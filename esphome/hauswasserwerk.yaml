@@ -1,23 +1,38 @@
-# Smart Hauswasserwerk - UART tap probe firmware
+# Smart Hauswasserwerk - HD44780 LCD bus sniffer
 #
 # Target: Seeed Studio XIAO ESP32C6 (ESP32-C6FH4, 4MB flash, native USB-Serial/JTAG)
+# Tapped device: Parkside PHGA 1300 A1 display/control board, 2x16 character LCD
 #
-# Stage 1 firmware: passively listens on the tapped UART line and dumps every
-# received frame as both hex and ASCII, so the protocol can be reverse
-# engineered from the logs. No bytes are ever transmitted back to the tapped
-# board (rx_pin only, no tx_pin) - this is strictly listen-only.
+# The pump's MCU drives its LCD over a 4-bit HD44780 bus with RW strapped low.
+# This firmware watches RS/E/D4-D7, rebuilds the controller's DDRAM, and
+# publishes the two rendered rows. It is strictly listen-only: all six taps are
+# configured as inputs and no code path drives them. Because the pump never
+# reads back (RW low), there is no bus contention to create even in a fault.
+#
+# READ BEFORE WIRING: mains isolation of the pump's logic section and the
+# actual logic level are both unresolved. See README.md - nothing gets
+# connected until those are settled, and the ESP32-C6 is not 5 V tolerant.
 
 substitutions:
   name: hauswasserwerk
   friendly_name: Hauswasserwerk
 
-  # --- Tap configuration -------------------------------------------------
-  # D7 on the XIAO silkscreen == GPIO17. Wire this to the TX line of the
-  # board being tapped, and tie the two grounds together.
-  tap_rx_pin: GPIO17
-  # Unknown until we see traffic. If the logs show garbage/no data, change
-  # this and reflash - common values: 1200 2400 4800 9600 19200 38400 57600 115200
-  tap_baud_rate: "9600"
+  # --- Tap pin map -------------------------------------------------------
+  # XIAO silkscreen D0-D5, a contiguous run for a tidy ribbon. Every one is
+  # below GPIO24, so a single GPIO_IN_REG read latches all six atomically,
+  # and none of them is an ESP32-C6 strapping pin (those are 8, 9 and 15).
+  #
+  # Which LCD header pin carries which role is NOT yet known - a multimeter
+  # cannot tell RS from D6. Six active lines were measured on header pins
+  # 2, 3, 5, 7, 8, 9. Identify E and RS from the edge statistics first, then
+  # sweep the 24 remaining data orderings by editing the four d*_pin lines
+  # below and pushing OTA. No rewiring needed for any of it.
+  tap_e_pin: GPIO0 # D0
+  tap_rs_pin: GPIO1 # D1
+  tap_d4_pin: GPIO2 # D2
+  tap_d5_pin: GPIO21 # D3
+  tap_d6_pin: GPIO22 # D4
+  tap_d7_pin: GPIO23 # D5
 
 esphome:
   name: ${name}
@@ -35,6 +50,13 @@ esp32:
   framework:
     # ESP32-C6 is only supported via ESP-IDF, not the Arduino framework.
     type: esp-idf
+
+# The sniffer lives in this repository. `external_components` is the current
+# mechanism - the old `platform: custom` lambda hook is deprecated.
+external_components:
+  - source:
+      type: local
+      path: components
 
 # --- Antenna ---------------------------------------------------------------
 # The XIAO ESP32C6 routes its radio through an RF switch. Seeed's docs are
@@ -69,36 +91,53 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# Lets us watch the tap live in a browser without Home Assistant.
+# Lets us watch the decoded display live in a browser without Home Assistant.
 web_server:
   port: 80
 
 # --- Logging ---------------------------------------------------------------
 logger:
   level: DEBUG
-  # Pin logging to the native USB port so it cannot collide with the hardware
-  # UART used for the tap.
+  # Native USB port. Nothing here shares a hardware UART with the tap, but
+  # pinning it keeps the log independent of pin assignment changes.
   hardware_uart: USB_SERIAL_JTAG
 
 # --- The tap ---------------------------------------------------------------
-uart:
-  id: tap_uart
-  rx_pin: ${tap_rx_pin}
-  baud_rate: ${tap_baud_rate}
-  # Generous buffer so bursts are not dropped while the log drains.
-  rx_buffer_size: 2048
-  debug:
-    direction: RX
-    # Nothing else consumes this UART, so the debug hook sees every byte.
-    dummy_receiver: true
-    after:
-      bytes: 256
-      # Idle gap ends a frame - this is what reveals the message framing of an
-      # unknown protocol.
-      timeout: 40ms
-    sequence:
-      - lambda: UARTDebug::log_hex(direction, bytes, ' ');
-      - lambda: UARTDebug::log_string(direction, bytes);
+hd44780_tap:
+  id: lcd_tap
+  e_pin: ${tap_e_pin}
+  rs_pin: ${tap_rs_pin}
+  d4_pin: ${tap_d4_pin}
+  d5_pin: ${tap_d5_pin}
+  d6_pin: ${tap_d6_pin}
+  d7_pin: ${tap_d7_pin}
+  columns: 16
+
+  # Nibbles carry no framing bits, so a stream joined mid-byte stays off by one
+  # forever and still decodes into plausible-looking text. Two boundary signals
+  # break that: a change in RS (which is held for a whole byte), and an idle gap
+  # longer than this. 200us is deliberately conservative - tighten it only once
+  # the real inter-nibble and inter-byte gaps have been measured, because a
+  # value below the true inter-nibble gap corrupts every byte.
+  idle_gap: 200us
+
+  # Set true to log every E edge and every decoded byte. This is how the pin
+  # roles get solved and how the E period gets measured; turn it off once the
+  # mapping is confirmed, since it is far too chatty for normal running.
+  raw_capture: false
+
+  line_1:
+    name: "LCD Line 1"
+  line_2:
+    name: "LCD Line 2"
+
+  # Diagnostics that answer the two questions the design depends on:
+  # how fast is E actually strobing, and are we losing edges to ISR latency?
+  # ESP32 GPIO interrupt latency runs ~2-3us with jitter once WiFi is active.
+  edge_rate:
+    name: "LCD Edge Rate"
+  dropped_samples:
+    name: "LCD Dropped Samples"
 
 # --- Diagnostics -----------------------------------------------------------
 sensor:
