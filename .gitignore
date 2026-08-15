@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# Secrets - never commit.
+# esphome/secrets.yaml.example is the tracked template; the real file is not.
+# A bare pattern matches at any depth, so this covers esphome/secrets.yaml too.
+# ---------------------------------------------------------------------------
+secrets.yaml
+
+# ---------------------------------------------------------------------------
+# ESPHome / PlatformIO build output
+# esphome/.esphome alone is ~7 MB of vendored framework sources.
+# ---------------------------------------------------------------------------
+.esphome/
+.pio/
+.pioenvs/
+.piolibdeps/
+dependencies.lock
+
+# Compiled firmware images
+*.bin
+*.elf
+*.map
+
+# ---------------------------------------------------------------------------
+# Python toolchain - ESPHome runs from a project-local venv, never globally
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Logic-analyser and scope captures from reverse-engineering the LCD bus.
+# These grow to hundreds of MB. Commit a decoded summary, not the raw session.
+# ---------------------------------------------------------------------------
+*.sr
+*.srzip
+*.vcd
+captures/
+
+# ---------------------------------------------------------------------------
+# Editors, OS, tooling
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal permission grants. A shared .claude/settings.json stays tracked.
+.claude/settings.local.json
