@@ -1,0 +1,148 @@
+# Bus probe - identify what the pump's six-pin header actually carries.
+#
+# Six lines were brought out of the Parkside PHGA 1300 A1 and wired to D0-D5.
+# A multimeter read four of them at 3.35 V and two at 0 V, which is consistent
+# with either an idle HD44780 bus (E resting low, RS/D4-D7 holding the last
+# nibble) or a debug header (GND, VCC, an idle-high UART TX, a reset line).
+# Static levels cannot separate those. Edge behaviour can.
+#
+# This firmware only watches. Every pin is an input; nothing is ever driven.
+#
+# What to look for in the 10 s report:
+#
+#   Static, no edges ever ............ supply rail, ground, or a strapped line
+#                                      (0 V and never moves => GND or RW-low)
+#   Highest edge rate, narrow pulses,
+#     changes mostly alone ........... a clock or an HD44780 E strobe
+#   Change together in one sample .... a parallel data bus (see the
+#                                      coincidence matrix)
+#   Regular pulse widths, all
+#     multiples of one bit time ...... async serial; check the ~baud column
+#   Changes once per screen update ... RS, or a chip select
+#
+# If nothing moves at all, the pump's MCU is only refreshing on change - press
+# a button on the pump and watch the next window.
+#
+# --- Run 1, floating inputs, 5 x 10 s windows, 0 dropped -------------------
+#
+#   D0..D3   level 1, ZERO edges in 50 s
+#   D4       ~460 edge/s, 52% high, min pulse 3 us, max hold ~10.5 ms
+#   D5      ~2700 edge/s, 45% high, min pulse 3 us, max hold ~11.4 ms
+#   coincidence matrix: all zero - D4 and D5 never moved in the same sample
+#
+# Neither pin looks driven. A ~10 ms maximum hold time with bursts of 3 us
+# chatter at each end is 50 Hz mains coupling into a high-impedance node
+# (100 crossings/s, chatter as the slow sine crawls through the input
+# threshold), not a logic signal - and no logic signal survives with a 50%
+# duty cycle and no partner line ever changing with it. So run 1 says: no
+# active bus was observed on any of the six lines.
+#
+# --- Run 2, the driven-vs-floating test ------------------------------------
+#
+# Set probe_pulldown to "true" and reflash. The ESP32-C6 internal pulldown is
+# ~45 kOhm, which any CMOS output or any pull-up under ~10 kOhm overrides
+# easily, so:
+#
+#   stays high  => genuinely driven high, or held by a pull-up => real line
+#   goes low    => the input was floating => that wire is not connected to
+#                  anything, or there is no shared ground with the pump
+#
+# The second outcome is the one to expect if the pump board's 0 V was never
+# tied to the XIAO's GND pin. Without a common reference every level here is
+# meaningless, which would explain all six readings at once.
+#
+# Result: the pulldown changed NOTHING. Byte-for-byte the same picture over
+# another 50 s. So:
+#
+#   D0..D3  held high against a 45 kOhm pulldown => something under ~10 kOhm
+#           is holding them there. Not floating, but also not switching, ever.
+#   D4, D5  kept their 50 Hz behaviour. A 45 kOhm pulldown swamps anything
+#           capacitively coupled, so the source is low impedance and real.
+#
+# And the periods settle it. Longest high plus longest low:
+#
+#   D4   10578 + 9623 = 20201 us -> 49.5 Hz
+#   D5    8917 + 11417 = 20334 us -> 49.2 Hz
+#   (run 1: 20108 us and 20351 us - the same, in a separate boot)
+#
+# 20 ms is mains. These two lines are not carrying data, they are following
+# the line frequency, which only happens on a node that is not referenced to
+# our ground. The differing duty cycles (52% and 45%) are two different DC
+# offsets on the same 50 Hz swing.
+#
+# That also explains D0..D3: a pump-side node sitting above our 3V3 rail is
+# clamped there by the ESP32's input protection diodes, which reads as a rock
+# steady logic high that no internal pulldown can shift. It is the clamp, not
+# a driver.
+#
+# Conclusion: there is no common ground between the pump board and the XIAO,
+# and the pump's reference floats at mains potential. This matches the -1.53 V
+# measured earlier on LCD header pin 0 - a negative reading like that is the
+# signature of a floating reference, not a real negative rail. No pin mapping
+# and no decoder can fix this; the tap has to be galvanically isolated.
+# See README.md, "The tap is blocked on isolation".
+
+substitutions:
+  name: hauswasserwerk-probe
+  friendly_name: Hauswasserwerk Probe
+
+  # "false" = float the inputs (run 1). "true" = engage the internal pulldown
+  # to separate driven lines from unconnected ones (run 2). Flipping this one
+  # value and reflashing is the whole experiment; no rewiring.
+  probe_pulldown: "false"
+
+packages:
+  common: !include common.yaml
+
+# The six taps, in silkscreen order, matching how the header was wired.
+# Labels are the XIAO pin so the report lines up with the physical wiring;
+# rename them to the pump's header positions once those are established.
+bus_probe:
+  id: header_probe
+  report_interval: 10s
+
+  # Logs every transition as a timestamped bit pattern. Leave off for the
+  # statistics pass; turn on to reconstruct the actual waveform once the
+  # interesting lines are known.
+  raw_dump: false
+
+  pins:
+    - pin:
+        number: GPIO0
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D0"
+    - pin:
+        number: GPIO1
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D1"
+    - pin:
+        number: GPIO2
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D2"
+    - pin:
+        number: GPIO21
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D3"
+    - pin:
+        number: GPIO22
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D4"
+    - pin:
+        number: GPIO23
+        mode:
+          input: true
+          pulldown: ${probe_pulldown}
+      label: "D5"
+
+  summary:
+    name: "Probe Summary"

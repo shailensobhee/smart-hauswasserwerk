@@ -92,6 +92,86 @@ the LCD never drives the data lines, and passive tapping carries zero
 contention risk. The negative bias rail confirms the panel has its own
 controller IC rather than raw multiplexed glass.
 
+### The six-line tap, probed
+
+Six lines were brought out of the pump board and wired to D0-D5. A multimeter
+read four at 3.35 V and two at 0 V, which fits an idle HD44780 bus just as well
+as it fits a debug header — static levels cannot tell those apart. Edge
+behaviour can, so `bus_probe` was written and flashed.
+
+Across three separate boots, roughly 100 s of any-edge capture per boot, with
+zero dropped samples:
+
+| pin | level | edges/s | high % | min pulse | max high | max low | verdict |
+|-----|-------|---------|--------|-----------|----------|---------|---------|
+| D0  | 1     | 0       | 100 %  | —         | —        | —       | static  |
+| D1  | 1     | 0       | 100 %  | —         | —        | —       | static  |
+| D2  | 1     | 0       | 100 %  | —         | —        | —       | static  |
+| D3  | 1     | 0       | 100 %  | —         | —        | —       | static  |
+| D4  | —     | ~460    | 52 %   | 3 µs      | 10.5 ms  | 9.6 ms  | 50 Hz   |
+| D5  | —     | ~2800   | 45 %   | 3 µs      | 8.9 ms   | 11.4 ms | 50 Hz   |
+
+The coincidence matrix is **all zeros**: in ~150 000 captured edges, no two
+pins ever changed in the same port read. There is no parallel bus here.
+
+Then the decisive test, which needs no rewiring — reflash with the ESP32-C6's
+internal ~45 kΩ pulldown engaged on all six pins. Any CMOS driver, and any
+pull-up under ~10 kΩ, overrides that easily; a floating pin does not.
+
+**Nothing changed.** Byte for byte the same picture.
+
+- **D0-D3** are held high against the pulldown, so something under ~10 kΩ is
+  holding them. But they never move — not one edge in 100 s.
+- **D4 and D5** kept their behaviour, so the source is low impedance and real,
+  not stray capacitive pickup.
+
+And the periods settle what that source is. Longest high plus longest low is
+the slowest full cycle each pin went through:
+
+```
+D4   10578 + 9623  = 20201 µs  ->  49.5 Hz
+D5    8917 + 11417 = 20334 µs  ->  49.2 Hz
+```
+
+**20 ms is mains.** The 3 µs "pulses" are threshold chatter as a slow sine
+crawls through the input trip point, ~100 crossings a second; the 52 % and
+45 % duty figures are just two different DC offsets on the same 50 Hz swing.
+`bus_probe` now detects this itself and prints `50Hz!` in place of the baud
+guess, plus a warning block.
+
+**Conclusion: there is no common ground between the pump board and the XIAO,
+and the pump's reference floats at mains potential.** A node that follows the
+line frequency is by definition not referenced to ours. That also explains
+D0-D3: a pump-side node sitting above our 3V3 rail gets clamped there by the
+ESP32's input protection diodes, which reads as an immovable logic high. It is
+the clamp holding them, not a driver.
+
+This retro-explains the −1.53 V measured on LCD header pin 0. A negative
+reading like that is the signature of a floating reference, not a real negative
+rail.
+
+### The tap is blocked on isolation
+
+No pin mapping and no decoder can fix a missing ground reference. The direct
+tap cannot work at any wiring order, so the 24-permutation sweep described
+below is moot until this is resolved. What comes next, in order:
+
+1. **Disconnect the six wires from the XIAO.** Right now the only thing
+   standing between the pump's floating reference and an earthed PC is the
+   ESP32's ESD diodes, which are conducting.
+2. **Measure it properly.** Pump live, ESP32 disconnected, AC volts from the
+   pump's 0 V to protective earth **through a ~100 kΩ resistor** (an unloaded
+   high-Z reading on a floating node means nothing). This is the test already
+   listed as unresolved item 3 — the probe has now made answering it mandatory
+   rather than merely prudent.
+3. **If that reads near zero**, the supply is isolated: bond the pump's 0 V to
+   the XIAO's `GND` pin — a ground wire, not a seventh GPIO — and re-run
+   `probe.yaml`. Expect the static/50 Hz picture to collapse into real logic.
+4. **If it reads tens or hundreds of volts**, the supply is a transformerless
+   dropper. Then no direct connection is acceptable at any point, and the tap
+   has to be galvanically isolated: an optocoupler per line, or a fully
+   isolated front end, with the ESP32 never sharing a conductor with the pump.
+
 ### Unresolved — must be settled before wiring
 
 1. **Which pin is which.** RS, E and the D4-D7 order are *not* determined. A
@@ -111,12 +191,15 @@ controller IC rather than raw multiplexed glass.
    or logic analyser, put 10k/20k dividers or a 74LVC245 buffer on all six
    taps. That costs about EUR 1 and makes the question moot.
 
-3. **Supply isolation.** Continuity from logic ground to Live, Neutral and
-   Earth reads OL with the mains switch both off and on. That is the right
-   test and a good sign, **but a capacitive-dropper or non-isolated buck supply
-   reads OL too** and will still put logic ground at mains potential. The board
-   has a relay but no obvious transformer, which points *towards*
-   non-isolated. Before connecting a grounded PC:
+3. **Supply isolation.** *Now the blocking item — see
+   [The tap is blocked on isolation](#the-tap-is-blocked-on-isolation). The bus
+   probe found two tapped lines cycling at 50 Hz, which is direct evidence that
+   the pump's reference is not ours.* Continuity from logic ground to Live,
+   Neutral and Earth reads OL with the mains switch both off and on. That is
+   the right test and a good sign, **but a capacitive-dropper or non-isolated
+   buck supply reads OL too** and will still put logic ground at mains
+   potential. The board has a relay but no obvious transformer, which points
+   *towards* non-isolated. Before connecting a grounded PC:
 
    - Inspect the topology: isolated flyback = small transformer + optocoupler +
      a visible isolation slot in the PCB. Non-isolated = X2 cap in series with
@@ -392,7 +475,9 @@ After the first USB flash, updates go over the air — which is what makes the
 ## Roadmap
 
 1. **Resolve isolation and logic level.** Nothing else is safe to wire until
-   these are settled. Fit dividers or a buffer regardless.
+   these are settled. Fit dividers or a buffer regardless. The bus probe has
+   turned this from a precaution into a hard blocker — see
+   [The tap is blocked on isolation](#the-tap-is-blocked-on-isolation).
 2. **External power monitoring.** A Shelly PM Mini Gen3 on the motor feed —
    metering-only, no relay contacts taking a 1300 W induction motor's inrush on
    every cycle. Fully external, zero risk, and gives the ground truth every
@@ -402,7 +487,10 @@ After the first USB flash, updates go over the air — which is what makes the
 4. **LCD sniffer.** ✅ Firmware written — see
    [the component](#the-hd44780_tap-component). Not yet wired or validated
    against real traffic.
-5. *Optional:* inline 0-10 bar pressure transducer and a YF-B10 brass Hall flow
+5. **Bus probe.** ✅ Written, flashed, and it has already earned its keep: it
+   proved the six-line tap has no valid ground reference before a single byte
+   was misdecoded. See [The six-line tap, probed](#the-six-line-tap-probed).
+6. *Optional:* inline 0-10 bar pressure transducer and a YF-B10 brass Hall flow
    sensor, read via ADS1115. A continuous pressure curve is more diagnostic
    than any discrete display state — it shows bladder pre-charge degradation,
    slow leaks, and dry-run onset before the MCU latches.
@@ -414,8 +502,13 @@ is written and compiles, but **has never seen a real bus** — every decode path
 in it is untested against actual traffic, and the pin roles it assumes are
 placeholders.
 
-Nothing is wired yet, and nothing should be until unresolved items 2 and 3
-(logic level, supply isolation) are settled.
+A six-line tap was wired to D0-D5 and probed. It carries no data as connected:
+four lines are immovably clamped high and two are cycling at 50 Hz, which is
+measured proof that the pump's reference floats with respect to the ESP32's.
+**Those wires should come off the XIAO until isolation is settled** — see
+[The tap is blocked on isolation](#the-tap-is-blocked-on-isolation). Unresolved
+items 2 and 3 (logic level, supply isolation) now block everything downstream,
+and item 3 is no longer a theoretical concern.
 
 Superseded: an earlier UART probe firmware, written before the bus measurements
 existed. There is no serial line on this board, so it could never have produced

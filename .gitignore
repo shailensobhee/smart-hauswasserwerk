@@ -40,6 +40,11 @@ __pycache__/
 *.vcd
 captures/
 
+# Raw serial-log captures from `esphome logs`. The findings get written up in
+# the README; the transcripts themselves are throwaway.
+probe_log.txt
+probe_err.txt
+
 # ---------------------------------------------------------------------------
 # Editors, OS, tooling
 # ---------------------------------------------------------------------------
