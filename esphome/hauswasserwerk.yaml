@@ -3,23 +3,41 @@
 # Target: Seeed Studio XIAO ESP32C6 (ESP32-C6FH4, 4MB flash, native USB-Serial/JTAG)
 # Tapped device: Parkside PHGA 1300 A1 display/control board, 2x16 character LCD
 #
-# The pump's MCU drives its LCD over a 4-bit HD44780 bus with RW strapped low.
-# This firmware watches RS/E/D4-D7, rebuilds the controller's DDRAM, and
-# publishes the two rendered rows. It is strictly listen-only: all six taps are
-# configured as inputs and no code path drives them. Because the pump never
-# reads back (RW low), there is no bus contention to create even in a fault.
+# ======================= THIS FIRMWARE IS SUPERSEDED ========================
 #
-# Flash probe.yaml first. Until the bus probe has identified which line is E
-# and which is RS, the pin roles below are guesses and this firmware will
-# decode garbage.
+# Use live.yaml instead. This file's premise is wrong for this pump.
 #
-# BLOCKED as of 2026-08-16. probe.yaml has run on the six-line tap and found no
-# bus at all: four lines immovably clamped high, two cycling at 50 Hz, and not
-# one coincident edge in ~150k samples. The pump's reference floats with
-# respect to ours, so no pin mapping can rescue this. Do not chase the data
-# ordering and do not read anything this firmware publishes until the ground
-# reference is fixed - by isolation, not by bonding. See README.md,
-# "The tap is blocked on isolation".
+# The panel is NOT a 4-bit HD44780 parallel bus. It is a two-wire clocked
+# serial stream, decoded and confirmed against real traffic on 2026-09-18:
+#
+#   D1 clock (rising edge), D2 data, MSB-first
+#   9-BIT WORDS - one flag bit, then the byte
+#   each display line introduced by payload 7C 40, then 16 character words
+#   line 2 starts two bits out of phase with line 1
+#   ~10 frames/s, 382 bits per frame, 191 when only one line is drawn
+#
+# live.yaml renders that continuously and has been watched through a full pass
+# of the MODE button: Standby -> Automatic -> Time -> Always On -> Standby.
+#
+# The evidence that killed the parallel model: with all ten header lines tapped
+# on D0-D9, only FOUR carried edges and two of those were noise. A 4-bit
+# HD44780 bus needs RS, E and D4-D7 all moving. That was first read as four
+# loose wires - it was not. Two wires carry the whole display.
+#
+# Nothing below has ever decoded a byte off this board. It is kept because the
+# HD44780 decoder is correct for panels that do use that bus, and because
+# hd44780_core is shared with bus_sweep. If you are working on THIS pump, you
+# want live.yaml.
+#
+# ============================================================================
+#
+# Everything from here down is the original parallel-bus configuration, left
+# intact. The isolation question it was once blocked on is settled: the logic
+# section is decoupled from mains and the pump's 0 V is bonded to the XIAO's
+# GND pin. The earlier probe run - four lines clamped high, two cycling at
+# 50 Hz, no coincident edges in ~150k samples - was an unbonded but isolated
+# secondary floating on interwinding capacitance, which looks identical to a
+# non-isolated supply until you bond it.
 
 substitutions:
   name: hauswasserwerk

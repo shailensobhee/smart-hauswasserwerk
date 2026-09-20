@@ -1,0 +1,1218 @@
+# Bus sweep - identify a header by brute force.
+#
+# CURRENT TARGET: the 6-pin connector near the display (XIAO D3, D4, D5, D6,
+# D9, D10), captured WHILE THIS FIRMWARE PRESSES THE PANEL'S MODE BUTTON.
+#
+# THE HEADLINE QUESTION IS ANSWERED, AND THE ANSWER IS NO. Neither the display
+# clock nor the data is among the six. Run 9 said so from silence; run 16
+# proved it properly, with D1-CLK, D2-DAT and D6 all moving in one buffer:
+# 88.4% and 86.5% level disagreement across two captures (the value
+# independence predicts), and a best CLOCKED score of 0.5 with D6 as clock.
+#
+# THE SOLDERED D1/D2 TAP STAYS. It is the only way to read this display.
+#
+# Per line, as of run 16:
+#   D3, D4   floating - mains pickup, 100% solitary. Reseat before believing
+#            anything about them; they are untested, not tested-negative.
+#   D5, D9   static HIGH in every capture, idle and provoked alike.
+#   D10      as D5/D9. The only edges these three have ever produced are 2-5
+#            us blips coincident with the MODE contact switching - crosstalk,
+#            not a response (run 15). They are not button lines.
+#   D6       the only one of the six carrying signal. Frame-synchronous
+#            bursts, holds HIGH for the length of a MODE press, uncorrelated
+#            with the display bus. Latch, chip-select or busy flag.
+#
+# WHAT IS LEFT IS A METER JOB, NOT A FIRMWARE JOB. DC volts on all six against
+# the bonded ground with the pump unplugged. More sweeps will not identify a
+# line that is static in every capture.
+#
+# The remaining firmware question: what ARE they? Run 9 left four of the six sitting static
+# HIGH with zero edges, which is what a pulled-up BUTTON INPUT looks like when
+# nobody is pressing the button, and equally what a dead test header looks
+# like. Nothing distinguishes those two without stimulus, and runs 1-9 applied
+# none. So this firmware drives the MODE switch itself, four presses inside a
+# window it opened, and the result is read as a difference against the idle
+# baseline the same firmware captures at boot.
+#
+# =========================== READ THIS FIRST ===============================
+#
+# NONE OF THE SIX HAVE BEEN METERED. A 6-pin connector almost always carries a
+# supply and a ground, and C6 GPIOs are not 5 V tolerant. If one of these is a
+# 5 V rail it is clamping through the protection diodes right now. Meter all
+# six against the bonded ground and pull anything above 3.3 V.
+#
+# The precedent is the LCD header, where pin 1 read +4.87 V (VDD) and pin 0
+# read -1.53 V (V0/VEE contrast bias - a negative rail has no tolerance margin
+# at all, it forward-biases the substrate diode directly). Those two are no
+# longer in this tap. Nothing says this connector is kinder.
+#
+# The six tapped lines are inputs and are never driven, and the report names
+# which XIAO pin each line landed on. But meter them before leaving the thing
+# powered.
+#
+# THIS FIRMWARE NOW ACTUATES THE PUMP. Runs 1-9 were listen-only and the banner
+# used to say so. It no longer can: D7/D8 are driven open-drain to press the
+# panel's MODE button, and pressing MODE four times walks the panel through all
+# four modes - INCLUDING ~420 ms in Always On, which is the mode with no dry-
+# run protection. The cycle ends where it started, so the pump is left in its
+# original mode, but it is a real press on a real appliance and the sequence
+# fires on a button in Home Assistant with no confirmation. Do not run it with
+# the pump in a state where a brief Always On would matter.
+#
+# The drive is open-drain, so it can only sink: the ESP cannot push 3.3 V onto
+# a line the pump's MCU is driving. That is the property that makes this safe
+# to do at all, and it is why the pins are configured the way they are rather
+# than as ordinary outputs.
+#
+# SEPARATE HAZARD, D6 = GPIO16 = UART0 TX. The mask-ROM bootloader prints its
+# banner on that pin at 115200 at EVERY reset, before any firmware runs.
+# ESPHome cannot suppress it: common.yaml logs over USB_SERIAL_JTAG, so UART0
+# is unclaimed once booted and the pin sits as a plain input, but the boot
+# burst has been going into that pump-board line on every power-up and every
+# OTA. Harmless at 3.3 V into a logic input, and it is over long before the
+# capture starts. If the pump ever twitches right after an ESP reset, this is
+# the first suspect - move that wire to D0 (GPIO0), which is free now.
+#
+# ============================================================================
+#
+# --- What this does --------------------------------------------------------
+#
+# Captures every edge on all ten lines into one buffer, then replays that same
+# buffer under every hypothesis it knows:
+#
+#   HD44780   every ordered (E, RS, D4-D7) assignment
+#   UART      each line as TX, at each standard baud, 8N1
+#   CLOCKED   each clock/data pair, both polarities, both bit orders, all
+#             eight byte alignments
+#
+# It also runs a test that is not a hypothesis at all: NET IDENTITY. Two pins
+# on one physical wire must read the same level in every sample, because a
+# sample is one atomic port read and there is no skew to explain a difference
+# away. Counting level disagreements per pair therefore settles "is this the
+# same wire?" outright, which coincident edges never can - D1 and D2 share 399
+# coincident edges and are plainly different wires. That test is the entire
+# point of the current run.
+#
+# Scoring one captured buffer many times, rather than capturing once per
+# hypothesis, means no hypothesis can win because its run happened to be
+# busier. It also means the whole permutation sweep costs one flash instead of
+# one OTA push per guess.
+#
+# Ten lines would be 151 200 ordered HD44780 permutations if all of them were
+# signals. They are not: the sweep first works out which lines actually moved
+# and permutes only those. On this header the expectation is six live signals
+# (RS, E, D4-D7) plus RW strapped low, two grounds and a supply - so 720
+# trials, the same as hand-picking the right six, without having to know which
+# six in advance. The log prints the active set and what it excluded.
+#
+# --- Before trusting anything it prints ------------------------------------
+#
+# 1. Confirm the backlight cathode really is logic ground. Pump unplugged,
+#    continuity from that pad to LCD header pin 4 (VSS). Many panels dim by
+#    switching the CATHODE low-side, which reads ~0 V but is a switching node,
+#    not a reference. If the sweep reports mains coupling, this is the first
+#    thing to re-check.
+#
+# 2. Every voltage quoted above predates the bond and was taken against a
+#    floating reference. Re-measure against the bonded ground before acting on
+#    any of it. Anything above 3.3 V must come off the XIAO.
+#
+# 3. Exercise the board DURING the capture window. Press MODE, cycle modes,
+#    let the pump run. An event-driven header looks exactly like a dead one if
+#    nothing happens while you are listening. No run so far has done this.
+#
+# --- Reading the result ----------------------------------------------------
+#
+# The verdict line is the summary; the per-pin table is the evidence. A null
+# result is a real answer:
+#
+#   SAME WIRE: Dx == D1     ->  THE PAYOFF. That easy pin is the display
+#   SAME WIRE: Dx == D2         clock (or data). Point clocked_tap in
+#                               live.yaml at it and desolder the display wire.
+#   INVERTED: Dx =! D1      ->  same net through a buffer. Usable, but check
+#                               the edge polarity in clocked_tap.
+#   A clear CLOCKED winner  ->  a serial bus. If it reads a pair from among
+#   on two of the six           the six with no same-wire hit, that is a
+#                               SECOND, independent bus on the easy connector.
+#   A clear HD44780 winner  ->  copy E/RS/D4-D7 straight into the tap config.
+#   NO TRAFFIC              ->  the display is not being refreshed, or the tap
+#                               is not on the lines it thinks it is.
+#   MAINS COUPLING          ->  the ground bond did not take. See (1).
+#   NO MATCH, traffic       ->  something is talking but not HD44780. Check
+#                               the active-line list against the header
+#                               pinout before believing it.
+#
+# Do not act on a same-wire call from a single run. Press "Re-run Sweep" and
+# confirm it reproduces, and check that a CLOCKED entry decodes recognisable
+# panel text from the same pin. Two independent routes to the same answer is
+# the bar; the runs 4-8 correction below is what happens without it.
+#
+# --- Run log ---------------------------------------------------------------
+#
+# Record results here as probe.yaml does. That inline history is the only
+# reason the earlier six-line conclusion is still reconstructable.
+#
+# ===== Runs 1-3 were on the OTHER header: an unknown 6-pin connector =====
+#
+# Those ran with D0-D5 on a 6-pin header that is NOT the LCD header. Nothing
+# they concluded transfers to the wiring below. Kept because run 3 is a
+# finished result, not an open question.
+#
+# --- Run 1, 2026-09-18, board NOT exercised --------------------------------
+#
+# Captured 0 samples in 60 s while bus_probe, reflashed minutes later onto the
+# same hardware, saw 420-5600 edges per 10 s window on D4. That looked like a
+# broken capture path at the time.
+#
+# It was not. The D4 wire was loose (see run 3), so the header really did go
+# quiet and then noisy again between flashes - an intermittent contact, not a
+# firmware fault. The suspicion was still worth acting on: loop() now polls the
+# port directly during capture, and a buffer that stays empty while the poll
+# sees movement reports CAPTURE BROKEN instead of NO TRAFFIC. A false negative
+# here ends the whole investigation, so it must never be the quiet outcome.
+#
+# --- Run 2, 2026-09-18, board NOT exercised --------------------------------
+#
+#   D0 D1 D2 D3   static HIGH, 0 edges
+#   D5            static LOW,  0 edges
+#   D4            ~310 edges/s, 15% high, 100% solitary, never coincident
+#
+#   D4 gap histogram (log2 us):  4-8us x772, 8-16us x165, then nothing until
+#   2-4ms x214 and 16-32ms x225.
+#
+# That shape is threshold chatter, not data: tight bursts of 4-8 us crossings
+# separated by millisecond-scale silence, which is what a slow analog swing
+# does as it crawls through the input trip point. 100% solitary confirms it -
+# D4 never once changed in the same port read as another line.
+#
+# Verdict: NO MATCH (best score 23.2, well under the 45 threshold). The eight
+# tied HD44780 entries all render as "wwww..." because with five static lines
+# every nibble decodes to the same constant 0x77; that tie is the signature of
+# a degenerate fit, not a near miss.
+#
+# Reading at the time: four lines strapped high, one strapped low, one
+# floating. Superseded by run 3 - D4 was simply not connected.
+#
+# --- Run 3, 2026-09-18, D4 reseated ----------------------------------------
+#
+#   D0 D1 D2 D3   static HIGH, 0 edges
+#   D4 D5         static LOW,  0 edges
+#
+#   0 samples, 0 ISR calls, 0 polled changes, over the full 60 s.
+#
+# The chatter is gone: D4 now sits at a steady low, which is what it should
+# have read all along. All three counters agreeing at zero is the important
+# part - the polled cross-check and the interrupt path independently saw
+# nothing, so this is a real silence rather than a capture that failed.
+#
+# Verdict: NO TRAFFIC. Four lines high, two low, nothing moving for a minute.
+# A 6-pin header of four pulled-up lines and two grounds is the shape of a
+# programming header (AVR ISP, PIC ICSP). Settled; the meter can finish it.
+#
+# ===== Run 4 onward: the 10-pin LCD header, all ten lines ================
+#
+# --- Runs 4-8, 2026-09-18, board NOT exercised -----------------------------
+#
+# RESULT: the display text is recoverable from two wires.
+#
+#   VERDICT: CLOCKED  CLK=D1/rise  DATA=D2  MSB-first  align2  (165 B)
+#   decoded: ...@@@  |..|@  Standby Mode  |..|@   @@@...|@  Standby Mode  >@`>
+#
+# "Standby Mode" is the pump's own display text, decoded twice inside a single
+# 0.4 s capture, and reproduced on three separate captures (runs 4, 6, 8) at
+# the same clock/data pair. A twelve-character contiguous phrase is not
+# something a wrong hypothesis produces by chance.
+#
+# >>> CORRECTION, 2026-09-18, after live.yaml decoded the bus properly. <<<
+#
+# The pins, edge and bit order above are right. "align2 (165 B)" is NOT - and
+# it is worth understanding why, because the verdict looked like a decode and
+# was not one.
+#
+# The bus uses 9-BIT WORDS: one flag bit, then the byte. This sweep only ever
+# tried 8-bit words, so it could not read this bus. Replaying a real captured
+# frame through the sweep's own decode logic:
+#
+#   8 bits, all 8 alignments   nothing - not on one frame, not on eight
+#                              concatenated (382 % 8 = 6, so frame boundaries
+#                              shift the phase and it still never spells it)
+#   9 bits, align0             |@  Standby Mode  >@`
+#
+# Under an 8-bit reading of real frames: zero hits on any known string across
+# 61 unique frames x 8 alignments x both bit orders, best printable fraction
+# 18/47, and only 100 ones in 376 bits. Under 9-bit words the same frames
+# render "Time Mode", "Standby Mode", "NOT SET", "Always On" and
+# "Not Recommended" exactly. See live.yaml for the full protocol.
+#
+# So where did THIS run's "Standby Mode" come from? Unknown. The obvious
+# guess - that an 8-bit read drifts through a lucky phase - was tested and is
+# false. A plausible but untested explanation is that this capture was missing
+# about one edge in nine (the buffer filled in 0.4 s, mostly with D7/D8 noise),
+# which would make the stored stream effectively 8 bits per word. The raw
+# capture was not kept, so it cannot be settled. Recorded as unexplained
+# rather than given a tidy story.
+#
+# bus_sweep now sweeps 8- and 9-bit words and prints the word length in its
+# verdict, so a repeat of this run would report "MSB 9b". The general lesson is
+# that a hypothesis family with a hidden fixed parameter fails by scoring well
+# for the wrong reason, not by scoring badly - which is much harder to notice.
+#
+#   line  edges   edge/s   high%   solo%   reading
+#   D0    0       0        100%    -       static HIGH
+#   D1    2657    6648     96.0%   76%     CLOCK  - idles high, 11 us low pulses
+#   D2    474     1186     92.9%   12%     DATA   - 399 edges coincident with D1
+#   D3    0       0        0%      -       static LOW
+#   D4    0       0        100%    -       static HIGH
+#   D5    0       0        0%      -       static LOW
+#   D6    0       0        100%    -       static HIGH
+#   D7    1335    3340     18.9%   87%     noise  - solitary, nothing decodes
+#   D8    5258    13157    55.9%   96%     noise  - locked to 50 Hz mains
+#   D9    0       0        0%      -       static LOW
+#
+# D1 and D2 are a genuine pair: 399 coincident edges, and D2's 12% solitary
+# rate says it almost never moves without D1. D7 and D8 are the opposite -
+# 87% and 96% solitary, never in step with anything - which is the signature
+# of a floating input, not a bus.
+#
+# --- What this does NOT establish ------------------------------------------
+#
+# Which LCD header pin D1 and D2 actually are. The sweep labels XIAO
+# silkscreen, and the wiring order into the header was never recorded. That
+# mapping needs the meter.
+#
+# The six static lines were read here as possibly four loose wires. RESOLVED,
+# and it was the other branch: this panel takes a serial interface. Two wires
+# carry the entire display, the other eight are rails and unused pins, and
+# nothing needs re-seating. The loose-D4 precedent from runs 1-3 was good
+# reason to check, but it was not the answer this time.
+#
+# HD44780 was never scored here: only four lines moved and the hypothesis
+# needs six, so the permutation count was 0. That was read as a statement about
+# the tap rather than a rejection of HD44780 - fair at the time, but the tap
+# was fine and HD44780 is simply not what this panel speaks.
+#
+# --- Still outstanding -----------------------------------------------------
+#
+# 1. SAFETY. The +4.87 V and negative-bias rails are still in the tap. They
+#    are among the static lines - the HIGHs are {D0, D4, D6} and the LOWs are
+#    {D3, D5, D9}. Identify and disconnect them.
+# 2. Meter D0-D9 against the bonded ground, and write down which LCD header
+#    position each XIAO pin is on. Everything downstream needs that map.
+# 3. ~~Re-seat the six static wires.~~ Dropped. They are static because they
+#    are rails and unused pins; the display is entirely on D1 and D2.
+# 4. ~~No run has had the pump's buttons worked during the capture window.~~
+#    Done, but not here - a 0.4 s window cannot catch a human pressing a
+#    button, which is why live.yaml exists. Button mapping is in that file.
+#
+# --- Component changes these runs forced -----------------------------------
+#
+# Run 4 found "Standby Mode" and the report buried it under MAINS COUPLING.
+# Run 5 lost the phrase entirely. Three separate defects, all fixed:
+#
+#   * Mains vetoed every hypothesis, not just the ones reading the coupled
+#     line. On a whole-header tap an unused floating line is ordinary, and it
+#     was suppressing the only real finding in the report.
+#   * Known-string matching only searched the ~40-character printable sample
+#     kept for display, so a phrase further into the stream was invisible.
+#     Whether a hypothesis is right cannot depend on where in the window the
+#     interesting part fell.
+#   * The clocked sweep chose its byte alignment by printable ratio alone,
+#     before checking for known strings - so a shifted alignment with more
+#     bytes in 0x20-0x7E beat the alignment that actually spelled something.
+#
+# A fourth: the runner-up used for the margin test is now the best hypothesis
+# reading a DIFFERENT set of lines. Rising- and falling-edge variants of one
+# clock necessarily score within a point of each other, and counting one as
+# the other's rival made a clean result look contested by itself.
+#
+# ===== Run 9 onward: the 6-pin header, with D1/D2 as a reference =========
+#
+# >>> THE WIRING CHANGED. D3, D4, D5, D6 and D9 are NOT on the LCD header any
+# >>> more - they now go to the 6-pin connector near the display, and D10 has
+# >>> been added. Every row for those pins in the runs 4-8 table above is
+# >>> about different wires and means nothing here. Only the D1 and D2 rows
+# >>> carry over, and only because those two are still soldered to the same
+# >>> display lines.
+#
+#   D1  GPIO1   display (soldered)   CLOCK - idles high, 11 us lows, 6650 e/s
+#   D2  GPIO2   display (soldered)   DATA  - 1190 e/s, 399 coincident with D1
+#   D3  GPIO21  6-pin header         unknown
+#   D4  GPIO22  6-pin header         unknown
+#   D5  GPIO23  6-pin header         unknown
+#   D6  GPIO16  6-pin header         unknown - UART0 TX, see the banner
+#   D9  GPIO20  6-pin header         unknown
+#   D10 GPIO18  6-pin header         unknown
+#
+# D0, D7 and D8 are dropped. D7/D8 are the MODE switch and are DRIVEN by
+# live.yaml; putting a driven pin into a listen-only sweep would be measuring
+# ourselves. D0 is free, and is the spare if the D6 wire has to move off
+# UART0 TX.
+#
+# Expect FEWER active lines than run 4-8 had rows: the two display wires are
+# certain to move, and how many of the six join them is the finding. The
+# HD44780 family needs six moving lines and will almost certainly not run,
+# which is correct - this panel is serial.
+#
+# --- Run 9, 2026-09-19, board NOT exercised --------------------------------
+#
+# ANSWER: NO. Neither the clock nor the data is among the six.
+#
+#   16384 samples over 0.58 s, 247 overflowed
+#   Active: D1-CLK D2-DAT D3 D4      Static: D5 D6 D9 D10
+#
+#   line    now  edges  edge/s  high%  solo%  reading
+#   D1-CLK   1    3066   5256   96.9%   70%   CLOCK (reference)
+#   D2-DAT   1    1480   2537   93.7%   49%   DATA  (reference)
+#   D3       1    2113   3622   28.6%   80%   50 Hz mains, halves 28/72
+#   D4       0    1514   2596   17.1%   68%   19.9 ms cycle, halves 17/83
+#   D5 D6 D9 D10  0 edges, static HIGH for the whole capture
+#
+#   level disagreement (% of 16383 samples):
+#            D1-CLK D2-DAT     D3     D4
+#   D1-CLK        -  22.6%  36.1%  45.4%
+#   D2-DAT    22.6%      -  34.4%  41.8%
+#   D3        36.1%  34.4%      -  37.5%
+#   D4        45.4%  41.8%  37.5%      -
+#
+#   "No two moving lines share a net."
+#
+# The net-identity test settles it outright. A shared wire reads 0.0%; an
+# inverted copy reads ~100%. Nothing here is near either. The smallest figure
+# in the matrix is 22.6% and it belongs to D1/D2 - the two lines that really
+# are one bus, which is the useful calibration: even a genuine clock/data pair
+# spends a fifth of its samples disagreeing. 34-45% is what unrelated lines
+# look like, and that is every unknown-vs-known cell.
+#
+# Note the coincident-edge matrix would have muddied this. D3 shares 366
+# coincident edges with D1 and D4 shares 245 - more than enough to look
+# interesting - while the level test says plainly that they are different
+# wires. That is exactly the failure mode the test was added to close.
+#
+# --- But two of the six are probably not connected -------------------------
+#
+# D3 and D4 are almost certainly FLOATING, acting as antennas:
+#
+#   D3   19.8 ms cycle, halves 28/72   -> flagged MAINS outright
+#   D4   19.9 ms cycle, halves 17/83   -> mains period, too lopsided to pass
+#   both 68-80% solitary, and gap histograms with the 2-4 us chatter peak
+#
+# A driven logic line cannot do that. Mains pickup at 50 Hz on a high-impedance
+# input is the signature of a wire that is not making contact - the same fault
+# that cost runs 1 and 2, and on D4/GPIO22, the same XIAO pin. Check both
+# before reading anything into their rows.
+#
+# It does not change the answer. A line carrying the display clock would be
+# driven and could not float. But until they are reseated, D3 and D4 are
+# untested rather than tested-negative.
+#
+# --- What the six actually are ---------------------------------------------
+#
+#   D5 D6 D9 D10   static HIGH, 0 edges, rock steady over 0.58 s
+#   D3 D4          unknown - not connected
+#
+# Four pulled-up lines with no traffic is the same shape runs 1-3 found on this
+# header (four high, two low) and points the same way: a programming or test
+# header, idle. THE METER FINISHES THIS, not more firmware. DC volts on each of
+# the six against the bonded ground, pump unplugged for continuity.
+#
+# Still worth checking with a live capture: whether any of the four moves when
+# the pump is actually exercised.
+#
+# ===== Run 10 onward: the board gets exercised ==============================
+#
+# Run 9's own entry above says "board NOT exercised", and that is a bigger hole
+# than it reads as. Runs 1-9 measured an idle panel, every one of them. Four
+# static HIGH lines is not evidence of a dead header if nothing ever asked them
+# to do anything.
+#
+# The advice run 9 left - "press Re-run Sweep and work every control" - was not
+# just inconvenient, it was IMPOSSIBLE. Arming happens in Home Assistant and
+# the window closed 0.58 s later; no hand gets from a phone to the panel in
+# that time. A sweep that has to be exercised by a human is a sweep that never
+# gets exercised.
+#
+# Two changes fix it, and both are in the config below:
+#
+#   1. D1/D2 come OUT of the tap. They were 7800 of the ~7800 edges/s that made
+#      the window 0.58 s. Their job - anchoring the net-identity test - is
+#      done.
+#   2. The firmware presses MODE itself, 50 ms after arming, four times. The
+#      press is inside the window by construction instead of by luck.
+#
+# What to compare. Every boot still runs an unprovoked capture after
+# settle_delay; that is the CONTROL. Then press "Sweep With MODE Presses" for
+# the provoked one. The finding is the difference:
+#
+#   static in both              -> rail, ground, or genuinely unconnected
+#   static idle, moves provoked -> a button or status line. THIS IS THE FIND.
+#   moves in both               -> free-running; D3/D4 will do this while they
+#                                  are still floating, and it means nothing
+#
+# Run 10a, 2026-09-20 00:26 - IDLE BASELINE (the automatic boot capture).
+#
+#   16384 samples over 1.03 s, 23 overflowed
+#   Active: D3 D4      Static: D5 D6 D9 D10
+#
+#    # label  now  edges  edge/s   high%   solo%
+#    0 D3      0   3657  3565.9   30.8%    100%   -> MAINS, 19.8 ms, halves 30/70
+#    1 D4      0   1098  1070.6   19.2%    100%   -> 20.1 ms, halves 19/81, floating
+#    2 D5      1      0     0.0    100%       -
+#    3 D6      1      0     0.0    100%       -
+#    4 D9      1      0     0.0    100%       -
+#    5 D10     1      0     0.0    100%       -
+#
+#   coincident edges: ALL ZERO, every pair including D3<->D4
+#   level disagreement: D3 <-> D4  57.2%
+#   VERDICT: 1 pin(s) cycling at the mains frequency.
+#
+# Reproduces run 9 exactly on the part that matters: four lines static HIGH
+# with zero edges, D3/D4 coupled to mains.
+#
+# D3 AND D4 ARE NOW CONFIRMED FLOATING, not merely suspected. Run 9 had them at
+# 68-80% solitary; with D1/D2 out of the tap there is nothing left to coincide
+# with and both read 100% solitary and ZERO coincident edges with anything,
+# including each other. Two independent antennas, 57.2% disagreement, sharing
+# nothing. A wire that is actually connected to a driven line cannot look like
+# that. Reseat both before reading anything into their rows.
+#
+# THE WINDOW IS 1.03 s, NOT THE 2.6 s ESTIMATED ABOVE. D3/D4's 4636 edge/s of
+# mains garbage is what sets it. Consequence for the provoked run: presses land
+# at 50, 470 and 890 ms, so THREE of the four are recorded and the fourth
+# happens after the buffer is full. That is enough to detect a line moving, and
+# the pump still ends in its starting mode because all four presses execute
+# regardless of whether the buffer is still listening. Reseating D3/D4 would
+# take the window to the full 60 s and remove the constraint entirely.
+#
+# Run 10b/10c, 2026-09-20 00:31 and 00:32 - PROVOKED. THE ANSWER.
+#
+# All four lines that had been static HIGH across runs 9 and 10a carried edges
+# the moment the firmware pressed MODE. The header is alive and it is
+# event-driven; every previous run measured it asleep.
+#
+#                  10a idle        10b provoked      10c provoked
+#   D5        0 edges, HIGH     20 edges          8 edges, 100% high
+#   D6        0 edges, HIGH     42 edges          74 edges, 4.5% high
+#   D9        0 edges, HIGH     38 edges          6 edges, 100% high
+#   D10       0 edges, HIGH     30 edges          8 edges, 100% high
+#   D3     3657 edges, MAINS     0 edges, LOW     0 edges, LOW
+#   D4     1098 edges, MAINS     2 edges           0 edges, LOW
+#
+# THE TIMING IS THE PROOF, NOT THE EDGE COUNT. A few dozen edges could be
+# anything. These match a cadence that existed nowhere but in this firmware's
+# substitutions:
+#
+#   commanded   120 ms press + 300 ms gap = 420 ms period
+#   observed    D5/D9/D10 max_hi = 431849, 431853, 431849 us
+#               (420 ms + ~12 ms of script/scheduler overhead)
+#   commanded   120 ms press
+#   observed    D6 max_hi = 120033 us (10b) and 119955 us (10c)
+#
+# D6 tracks the press to within 45 us across two runs. That number came off the
+# pump board and matches a duration only the ESP knew.
+#
+# D6'S POLARITY RULES OUT THE OBVIOUS READING. It goes HIGH while the contact
+# is CLOSED. If D6 were on the MODE switch node it would go LOW - that node is
+# what D7/D8 pull to ground to make the press. So D6 is not the switch; it is
+# something the pump's MCU ASSERTS in response to seeing the button down. A
+# keypad scan line, an acknowledge, a beeper or backlight enable.
+#
+# --- Two things in this report that must NOT be believed ---------------------
+#
+# 1. THE SAME WIRE / INVERTED FINDINGS ARE ARTIFACTS HERE. The report claims
+#    "SAME WIRE: D5 == D10 - 0 disagreements" and "INVERTED: D6 is an inverted
+#    copy of D5". Both are meaningless on this data, and the defect is in the
+#    test rather than the wiring.
+#
+#    The net-identity test counts SAMPLES where two levels differ. It assumed
+#    the lines under test actually exercise both levels - true for the bus it
+#    was written against, false here. D5/D9/D10 sit high 100.0% of the capture
+#    and D6 sits low 95.5% of it. So "0 disagreements" mostly says "both sat
+#    HIGH the whole time", and "99.7% disagreement" says "one sat high while
+#    the other sat low". Neither is evidence about wires.
+#
+#    The active_ filter was supposed to prevent exactly this and does not: it
+#    only requires one edge, and 8 edges in 16384 samples is a line that is
+#    static 99.95% of the time. The test needs a duty-cycle guard, not just an
+#    edge guard.
+#
+#    It also fails the reproduction rule. 10c shows D5 and D10 byte-identical -
+#    same 8 edges, same 431849 max_hi, all 8 coincident, 0 disagreements. 10b
+#    shows 20 vs 30 edges and 11 disagreements. A same-wire verdict that does
+#    not reproduce is not a verdict.
+#
+# 2. D3 AND D4 CHANGED RESTING STATE BETWEEN 10a AND 10b, from mains-coupled
+#    floating to static LOW, and no button press does that. Either the wires
+#    were touched between captures or the connection settled. Their rows are
+#    not comparable across the two runs, and both still need reseating.
+#
+# Run 11, 2026-09-20 00:54 - D3/D4 OUT OF THE TAP, USB DISCONNECTED.
+#
+#   16384 samples over 0.91 s, 543 overflowed
+#   Active: D6 only    Static: D5 D9 D10 (HIGH)
+#
+#    1 D6      0   6124  6757.5    3.9%   min_hi 2  max_hi 67  max_lo 90418  solo 100%
+#    D6 gaps: 0 41 1310 2757 1518 411 73 5 0 0 0 0 0 0 0 9
+#
+# D6 WENT FROM ZERO EDGES TO 6757/s ON UNCHANGED WIRING. Run 10a had it static
+# HIGH. Same pin, same firmware family, ~28 minutes apart. The header changes
+# behaviour between captures, which is why the interval re-arm below exists -
+# a one-shot boot capture cannot see this and would just have disagreed with
+# the previous run.
+#
+# NOT THE ESP TALKING, though that was the first suspect - D6 is GPIO16, which
+# is UART0 TX, and the gap histogram peaks at 4/8/16/32 us, which is 115200
+# baud bit timing. Two things rule the ESP out:
+#
+#   logger: hardware_uart: USB_SERIAL_JTAG   - UART0 is never claimed
+#   POLARITY - a UART TX idles HIGH. D6 is 3.9% high: it idles LOW with short
+#              active-high pulses, max_hi 67 us, max_lo 90 ms.
+#
+# An idle-low line with ~3400 narrow high pulses per second in bursts is a
+# strobe or a clock, driven by the pump board. It is also consistent with run
+# 10's D6 behaviour - asserted HIGH to mean something - rather than in tension
+# with it.
+#
+# D3/D4 REMOVAL WORKED AND ALSO CONFIRMED THE DIAGNOSIS: with them out, D5, D9
+# and D10 recorded exactly zero edges and all coincident counts are zero. The
+# 16384 samples that used to be "D3/D4 sub-ISR chatter" are now genuinely D6.
+#
+# Run 12, 2026-09-20 01:03-01:05 - the first TIME SERIES, 60 s apart, with
+# nobody in the room and nothing pressed.
+#
+#   time      D6 edges   edge/s   high%   max_lo     D6 gap histogram peak
+#   01:03:50      9021   8965.9    5.1%   90418 us   4/8/16 us
+#   01:04:50      8192   7684.4    4.4%   90596 us   4/8/16 us
+#   01:05:50      5467   6583.5    4.5%   90434 us   4/8/16 us
+#
+# D6 IS FREE-RUNNING AND PERIODIC. max_lo lands on 90418, 90596, 90434 us -
+# stable to 0.2% across three independent captures. That is a repeating burst
+# structure at ~11 Hz, not noise; noise does not keep a period to two parts in
+# a thousand.
+#
+# ~90 ms IS THE DISPLAY FRAME PERIOD. clocked_tap measures the panel at ~10
+# frames/s with frames up to 90 ms apart, and D1's own gap histogram is bimodal
+# on exactly that boundary. So D6 is bursting once per display frame.
+#
+# It is NOT the clock line, and the polarity is what says so: D1 idles HIGH
+# with ~11 us LOW pulses; D6 idles LOW with narrow HIGH pulses, 4-5% high.
+# Inverted idle states cannot be the same net, and run 9's disagreement matrix
+# said the same thing by a different route. A line that bursts once per frame
+# but is not the clock is a latch, chip-select or row strobe.
+#
+# D10 moved once, spontaneously: 2 edges, a 4 us LOW notch after 523285 us
+# high. One event in three captures is not yet anything. Noted so that the next
+# occurrence has something to reproduce against.
+#
+# THE OPEN QUESTION IS WHAT CHANGED. D6 was silent in runs 9 and 10a and has
+# been busy in every capture since. Three candidates, in rough order of
+# suspicion, and they are distinguishable by experiment rather than argument:
+#
+#   1. USB WAS DISCONNECTED between 10a and 11. That moved the ESP from
+#      PC-bonded ground to an external supply, which changes the reference the
+#      inputs are measured against. Testable: reconnect USB and re-capture.
+#   2. The panel is in a different mode. ~20 MODE presses were injected during
+#      run 10, in bursts of four. A 4-press cycle returns to the starting mode
+#      only if no press was swallowed or doubled.
+#   3. The wires were touched.
+#
+# Until one of those is settled, D6's activity cannot be attributed to the pump
+# doing something interesting rather than to the tap being measured differently.
+#
+# Run 13, 2026-09-20 01:11 - PROVOKED, with the duty-cycle guard in place.
+#
+#   16384 samples over 0.93 s, 1570 overflowed
+#
+#    # label  now  edges  edge/s   high%   min_hi   max_hi   max_lo  solo%
+#    0 D5      1      4     4.3   100.0%    50968   735001        9     0%
+#    1 D6      0   4769  5112.4    29.1%        2   119959    90444   100%
+#    2 D9      1      4     4.3   100.0%    50968   735008        2    50%
+#    3 D10     1      6     6.4   100.0%    50968   540440        9    33%
+#
+#   6 pair(s) too static to test
+#
+# THE GUARD IS CONFIRMED ON LIVE DATA, and on the exact shape that broke it.
+# Run 10c, given lines sitting high ~100% of the capture, asserted "SAME WIRE:
+# D5 == D10 - 0 disagreements in 16383 samples". Run 13 has the same three
+# lines at 100.0% high and refuses to call any pair. The disagreement matrix
+# still prints (D5/D9/D10 mutually 0.0%, all against D6 at ~65.6%) because the
+# numbers are real; what changed is that the report no longer converts them
+# into a claim they cannot support.
+#
+# D6 TRACKS THE PRESS A THIRD TIME: max_hi 119959 us against a commanded 120
+# ms. The gap was 600 ms this run and 300 ms in run 10, so the figure is not an
+# artefact of the sequence spacing. Its high% also jumps 4.4% -> 29.1%, which
+# is what holding a line for 120 ms inside a 930 ms window looks like.
+#
+# BUFFER-LIMITED, AND THAT IS THE RESULT THAT MATTERS FOR THE NEXT RUN. D6
+# filled 16384 samples in 0.93 s while the press sequence needs 2.9 s, so ONE
+# press was captured and D5/D9/D10 logged 4-6 edges between them. Their rows
+# are a sample of the response, not the response.
+#
+# Still, what landed is suggestive: D5, D9 and D10 all report min_hi = 50968 us
+# - identical to the microsecond across three lines - and their edges coincide
+# (D5/D10 4, D5/D9 2, D9/D10 2). Three lines moving together on a shared
+# 51 ms interval. That is the thing run 14 is built to look at.
+#
+# --- Run 15, 2026-09-20, D6 RESTORED AS PRESS WITNESS ----------------------
+#
+# Run 14 removed D6 and got two clean 30 s provoked captures reading
+# "Active lines: (none)", D5/D9/D10 at zero edges. That null was mine, not the
+# board's. With D6 back, the same stimulus on the same hardware:
+#
+#   16384 samples over 0.52 s (789 overflowed), press 1 inside the window
+#    # label  now  edges  edge/s   high%   min_hi   min_lo   max_hi   max_lo
+#    0 D5      1      4     7.7  100.0%    50259        3   178935        4
+#    1 D6      0   3153  6065.9   28.3%        2        4   119336    90408
+#    2 D9      1      2     3.8  100.0%    50259        2    50259        2
+#    3 D10     1      4     7.7  100.0%    50259        4   178933        5
+#   [W] MODE press: contact CLOSED  01:36:58.263
+#   [W] MODE press: contact OPEN    01:36:58.345
+#
+# D6 max_hi 119336 us against a commanded 120 ms - the FOURTH reproduction.
+# The press was always being delivered. The USB disconnect broke nothing, and
+# the ground-bond hypothesis recorded in run 14 is dead.
+#
+# THE WITNESS EARNED ITS KEEP. Without D6 in the tap, run 14's report and a
+# genuinely dead board are the same document. Never run the provoked sweep
+# without a line known to respond to the stimulus.
+#
+# D5, D9 AND D10 ARE NOT BUTTON LINES, and this run is what says so. They did
+# move - which is why run 13's "shared 51 ms interval" looked promising - but
+# the shape settles it. Both instants are shared across all three lines to the
+# microsecond (50259 us, then 178935/178933 us), the pulses are 2-5 us wide on
+# lines that are otherwise 100.0% HIGH, and the two instants line up with
+# contact-close and contact-open. Simultaneous microsecond-wide blips on three
+# separate conductors at a switching event is CAPACITIVE CROSSTALK. A real
+# response looks like D6: 119 ms, on one line, 100% solitary.
+#
+# That also retires the run 13 note above: identical min_hi across three lines
+# is not three lines sharing a timer, it is three lines sharing one disturbance.
+#
+# --- What is settled, and what is next --------------------------------------
+#
+# Settled: D5, D9 and D10 are static HIGH in every capture, idle and provoked,
+# and produce nothing but crosstalk. The meter finishes them. The six are NOT
+# a live keypad header - that reading came from runs 10-13 counting crosstalk
+# blips as responses, and run 15 withdraws it. D6 is the only one of the six
+# carrying signal.
+#
+# Not settled, and now the whole question: WHAT IS D6? It free-runs at
+# 6000-8000 edge/s in a ~90.4 ms burst cycle (90383 / 90391 / 90408 us across
+# three captures), which is the display's frame period, and it holds HIGH for
+# the duration of a MODE press. Run 11 read its inverted idle as ruling out
+# the clock; that rules out a shared net but is the signature of an inverted
+# copy, which has never been tested because D1 and D6 have never been in the
+# tap together while both were moving.
+#
+# NEXT IS RUN 16, and it needs no press: D1-CLK + D2-DAT back in the tap
+# alongside D6. Three outcomes, all useful, on the `pins:` block below. This
+# also gives the CLOCKED family the two moving lines it needs - run 15 logged
+# "0 clocked hypotheses" with D6 alone, which was the test not running rather
+# than the test failing.
+#
+# --- Run 16, 2026-09-20, D1/D2/D6 ALL MOVING IN ONE BUFFER -----------------
+#
+# ANSWER: D6 IS NOT THE CLOCK AND NOT AN INVERTED COPY OF IT. The six easy
+# pins do not carry the display bus. The soldered D1/D2 tap stays.
+#
+# This is run 9's answer, but it is the first time it has actually been TESTED
+# on D6 rather than inferred from a silence. Two captures, 60 s apart:
+#
+#          D1-CLK D2-DAT     D6              D1-CLK D2-DAT     D6
+#   D1-CLK      -   1.3%  88.4%      D1-CLK       -   0.5%  86.5%
+#   D2-DAT   1.3%      -  88.5%      D2-DAT    0.5%      -  86.7%
+#   D6      88.4%  88.5%      -      D6       86.5%  86.7%      -
+#   "No two moving lines share a net."     (same, reproduced)
+#
+#   D1-CLK  228 edges  2504 edge/s  98.5% high
+#   D2-DAT   51 edges   560 edge/s  97.6% high
+#   D6     3197 edges 35111 edge/s  11.1% high
+#
+# 88.4% is not merely "not 0 and not 100". It is what INDEPENDENCE predicts to
+# within a point: two unrelated lines at 98.5% and 11.1% high should disagree
+# on 0.985*0.889 + 0.015*0.111 = 87.7% of samples. Measured 88.4% and 86.5%.
+# The lines are uncorrelated, not merely un-shorted.
+#
+# And the duty cycle settles it without reference to the window at all: an
+# inverted copy of a line that is high 98.5% of the time must be high 1.5% of
+# the time. D6 is high 11.1%. Inversion is arithmetically impossible, however
+# long the capture runs. That closes the loophole run 11's polarity note left
+# open - opposite idle levels ruled out a shared net but not an inverted one,
+# and this rules out both.
+#
+# SECOND, INDEPENDENT ROUTE, which is why this is being treated as settled.
+# The CLOCKED family finally had the two moving lines it needs and enumerated
+# D6 as clock against both known data lines. Best score 0.5 out of ~100,
+# decoding 142 bytes of dots. Meanwhile the same family scored 22.5 on
+# CLK=D1/DATA=D2 in the same buffer - the real bus, scoring 45x higher on a
+# window too short to assemble 9-bit words. The level test and the decoder
+# agree by different routes.
+#
+# WINDOW CAVEAT, recorded because it is severe and does not change the answer.
+# D6 ran at 35111 edge/s in this capture - 5x its usual 5000-8000 - and closed
+# the window at 0.09 s with 1146 overflowed. That is about ONE frame period,
+# and it landed mostly in the 87845 us inter-frame gap, which is why D1 vs D2
+# reads 1.3%/0.5% here against 22.6% in run 9: with both lines idling HIGH for
+# most of the window there is little left to disagree about. The duty-cycle
+# guard passed (D1's minority level holds ~245 samples, over the 64 floor) but
+# only just. The D6 conclusion does not rest on this - it rests on the duty
+# cycles being 98.5% vs 11.1%, which no window length can reconcile.
+#
+# --- The brownout, and why it nearly produced a fake result ----------------
+#
+# The first attempt at this run appeared to succeed and was not this firmware.
+# "INFO OTA successful", device rebooted, report printed - and the report was
+# the run 15 four-pin build. The boot log said why:
+#
+#   [I][app:151]: ESPHome version 2026.7.4 compiled on 2026-09-20 01:29:45
+#   [W][safe_mode:094]: OTA rollback detected! Rolled back from partition 'app1'
+#   [W][safe_mode:094]:  The device reset before the boot was marked successful
+#   [W][safe_mode:099]: Last reset was due to brownout - check your power supply!
+#
+# The six-pin image browned out during boot, before ESPHome could mark it
+# valid, and the bootloader reverted to the previous partition. A second
+# identical OTA booted clean and is what produced the numbers above.
+#
+# WHY IT IS THE SIX-PIN IMAGE THAT BROWNED OUT: the ISR is attached in setup()
+# and gated only for STORING samples - it still executes on every edge from
+# boot onward. Run 15 had one busy line (D6). Run 16 adds D1 and D2, roughly
+# tripling continuous interrupt load while WiFi is associating. Run 9 carried
+# eight pins without trouble, but run 9 was on USB power; this is the first
+# full tap on the external supply.
+#
+# TWO THINGS TO TAKE FROM THIS. First, the external supply is marginal - worth
+# fixing before it corrupts a run that is not so easy to catch. Second, and
+# worse: ALWAYS CHECK THE "compiled on" TIMESTAMP IN THE BOOT BANNER AGAINST
+# THE BUILD. "OTA successful" is the device acknowledging the upload, not a
+# statement about which image is running. Without that check this file would
+# now contain a run 16 entry reporting four pins and no D1/D2 rows, and the
+# obvious reading of it - "the pin list did not take" - would have been wrong
+# in a way that wasted a lot of time.
+#
+# --- What is settled, and what is next --------------------------------------
+#
+# SETTLED, and this closes the headline question of the whole exercise: the
+# six easy pins near the display do NOT carry the display clock or data.
+# D5/D9/D10 are static HIGH in every capture and produce only crosstalk;
+# D3/D4 are floating; D6 is live but uncorrelated with the bus (run 16). The
+# soldered D1/D2 tap is the only way to read this display and it stays.
+#
+# Still open, and much lower value now: what D6 is. Frame-synchronous bursts
+# (~90.4 ms, though 35 kHz and 8.5 ms in run 16 - it is not one fixed rate),
+# holds HIGH for the duration of a MODE press. Latch, chip-select or a busy
+# flag. THE METER FINISHES THIS, not more firmware, and the same meter pass
+# settles D5/D9/D10.
+#
+# Deferred, and only worth doing if D6 becomes interesting: one press at a
+# time with a long window. Reseat D3/D4 first - they are what shortens it.
+#
+# The hypothesis table is noise, as expected: best 30.6, an 8-bit CLOCKED
+# reading of D1/D2, which cannot be right - this bus is 9-bit. A 0.58 s window
+# with 247 overflowed samples is too short and too lossy for the 9-bit decode
+# to assemble. live.yaml is what reads this bus; the sweep's job here was the
+# level test, and that came back clean.
+
+substitutions:
+  name: hauswasserwerk-sweep
+  friendly_name: Hauswasserwerk Sweep
+
+  # The MODE switch wires, copied from live.yaml so this firmware can press the
+  # button itself. See the "Provoking the board" block below the pin list for
+  # why a sweep that cannot press its own button cannot answer the question it
+  # is being asked.
+  mode_pin_a: GPIO17 # D7
+  mode_pin_b: GPIO19 # D8
+  mode_press_ms: 120ms
+  # Bare integer for the log format above; ESPHome will not let a time value be
+  # interpolated into a printf argument. Keep the two in step.
+  mode_press_ms_int: "120"
+
+  # Gap between presses, and the one number in this file set by a hard
+  # constraint in both directions.
+  #
+  # UPPER BOUND, 800 ms: entering Time Mode opens a submenu ~800 ms after the
+  # contact releases, and once it is open MODE means "next menu item" rather
+  # than "next mode". Exceed it and the sequence stops being a mode walk and
+  # starts editing the timer.
+  # LOWER BOUND, the response width: run 10 measured the board holding D6 for
+  # 120 ms per press, so gaps near that size let one press's response run into
+  # the next and the report cannot attribute an edge to a press.
+  #
+  # 600 ms puts the next press at +720 ms from the previous one, 200 ms clear
+  # of the menu, with 5x separation between responses. Run 10 used 300 ms,
+  # which proved the header is live but overlapped the answers.
+  mode_gap_ms: 600ms
+
+  # FOUR presses, because the panel has exactly four modes - Standby,
+  # Automatic, Time, Always On - so a full cycle leaves the pump in the mode it
+  # started in. That is the reason for four rather than one: this firmware does
+  # not know the current mode and cannot read it back (no clocked_tap here), so
+  # any other count parks the pump somewhere it was not. The cycle does transit
+  # Always On for ~420 ms.
+  mode_presses: "4"
+
+packages:
+  common: !include common.yaml
+
+# Labels are the XIAO silkscreen pin, not the LCD header position, because the
+# silkscreen is what is checkable by eye against the physical wiring. Which
+# XIAO pin carries which LCD pin is exactly the unknown the sweep resolves -
+# encoding a guess in the labels would make its own output unreadable.
+bus_sweep:
+  id: header_sweep
+
+  # 16384 samples x 8 B = 128 kB, allocated once at setup, and the schema
+  # maximum. The noisiest tapped line sets the fill rate for all of them, so
+  # capacity buys window length only in proportion to how quiet the tap is.
+  #
+  # WHAT THE WINDOW IS NOW, and why it is the number to watch this run:
+  #
+  #   D3/D4 still floating   ~6200 edge/s  -> 2.6 s   press sequence just fits
+  #   D3/D4 reseated, quiet        0 edge/s -> 60 s   capture_timeout decides
+  #
+  # The 1.7 s press sequence has to finish INSIDE that window or the run
+  # measures an idle board again. 2.6 s is enough but has little margin, so if
+  # the capture line reports a window shorter than ~2 s, fix the floating wires
+  # before reading anything into the result - the noise is not just dirtying
+  # the data, it is cutting the experiment short.
+  capacity: 16384
+
+  # Let WiFi and the API associate first, so the capture is not competing with
+  # association for CPU.
+  settle_delay: 15s
+
+  # 30s, NOT 60s, and it has to stay below the interval re-arm below.
+  #
+  # Runs 9-13 always hit the buffer long before this timeout, so the value was
+  # decorative. With the two loud lines out of the tap the remaining three
+  # produce single-digit edge counts, so the buffer will never fill and the
+  # TIMEOUT is now what ends every capture. That makes it race the 60 s
+  # re-arm: at 60/60 a capture would be restarted at roughly the moment it
+  # expired, and could repeat forever without a single report being emitted.
+  #
+  # 30 s leaves 30 s of clearance and is still 10x the 2.9 s press sequence.
+  capture_timeout: 30s
+
+  # Byte-boundary signal for the HD44780 hypothesis only. A value below the
+  # true inter-nibble gap corrupts every byte, so this stays generous until
+  # there is a measured gap histogram to tighten it against.
+  idle_gap: 200us
+  columns: 16
+
+  # The six easy pins. Run 9 also tapped D1/D2 as a reference pair; run 10
+  # drops them, and the reason is a timing one rather than a change of mind.
+  #
+  # D1 and D2 together produce ~7800 edges/s, so they alone fill the 16384-
+  # sample buffer in 0.58 s. Nothing that has to be DONE to the board - a
+  # button press, a mode change, the pump starting - fits in 0.58 s, and the
+  # press sequence below runs 1.7 s. Keeping the reference pair would make an
+  # exercised capture structurally impossible: the window would close before
+  # the first press finished.
+  #
+  # They can come out because their job is finished. The reference pair was
+  # there to anchor the net-identity test, and run 9 answered that - the six
+  # disagree with D1/D2 on 34-45% of samples, and four of them logged zero
+  # edges while the display bus was demonstrably running at 5256 edge/s in the
+  # same buffer. A line on the clock's net cannot be silent while the clock is
+  # talking. Re-add both entries if that ever needs re-testing.
+  #
+  # >>> RUN 16: IT NEEDED RE-TESTING, AND D1/D2 ARE BACK. The paragraph above
+  # >>> is wrong about D6 specifically, and the error is worth keeping visible
+  # >>> because it is the same one that "34-45%" is quoted to avoid.
+  # >>>
+  # >>> Look at what run 9 actually logged: "Active: D1-CLK D2-DAT D3 D4 /
+  # >>> Static: D5 D6 D9 D10". D6 recorded ZERO edges, so it was never in the
+  # >>> disagreement matrix at all. The 34-45% range covers D3 and D4 and
+  # >>> nothing else. What ruled out D6 was the SILENCE argument - a line on
+  # >>> the clock's net cannot be quiet while the clock is talking.
+  # >>>
+  # >>> That argument was correct when it was made and is void now, because
+  # >>> D6 is not quiet any more. It free-runs at 6000-8000 edge/s. Nothing in
+  # >>> the firmware for that pin changed between the silent runs and the busy
+  # >>> ones, which leaves the wire itself as the likely variable - and this
+  # >>> file already draws exactly that conclusion two pins over: "until they
+  # >>> are reseated, D3 and D4 are untested rather than tested-negative".
+  # >>> Run 9 probably recorded the silence of a wire not making contact, and
+  # >>> silence proves nothing about a disconnected input.
+  # >>>
+  # >>> So the D1-vs-D6 level comparison has never run on a live D6. The
+  # >>> numbers that make it worth one capture:
+  # >>>
+  # >>>            edge rate        burst period      idle level
+  # >>>   D1-CLK   5256 edge/s      ~90 ms frame gap  HIGH, 11 us LOW pulses
+  # >>>   D6       6066-8170        90383/90391/90408 LOW, ~7% high
+  # >>>
+  # >>> Same rate, same period to 0.2%, opposite idle. The polarity note in
+  # >>> run 11 reads that as ruling D6 out, and it does rule out a SHARED net -
+  # >>> but opposite idle with matching timing is the definition of an
+  # >>> INVERTED copy, which report_() scores separately at >99% disagreement
+  # >>> and has never had the chance to report, because D1 and D6 have never
+  # >>> been in the tap together while both were moving.
+  # >>>
+  # >>> Three outcomes, all of them worth having:
+  # >>>   ~0%     same net - would contradict the polarity, believe neither
+  # >>>   >99%    inverted copy of the clock. THE PAYOFF: tap D6 on the easy
+  # >>>           header and invert in software; the soldered wires come off.
+  # >>>   30-45%  independent. D6 is its own frame-synchronous signal, and
+  # >>>           settling that closes the question honestly.
+  # >>>
+  # >>> This run also unblocks the CLOCKED family, which needs two moving
+  # >>> lines to form a clock/data pair. Run 15 logged "0 clocked hypotheses"
+  # >>> with D6 alone in the tap - that was not evidence against D6, it was
+  # >>> the test never running.
+  # >>>
+  # >>> No press is needed and none should be read into: the display bus
+  # >>> free-runs. Three busy lines fill the buffer in ~1.1 s, which is many
+  # >>> frames for a per-sample test but far too short for the press sequence.
+  #
+  # >>> RUN 16 IS DONE AND D1/D2 ARE OUT AGAIN. The answer was the third
+  # >>> outcome: 88.4% and 86.5% disagreement against D1 across two captures,
+  # >>> which is the product-of-marginals value for independent lines, and a
+  # >>> best CLOCKED score of 0.5 with D6 as clock. D6 is not the display bus.
+  # >>> Full entry in the run log above.
+  # >>>
+  # >>> They come out rather than staying because the cost is now unjustified
+  # >>> and it is worse than the 1.1 s estimated above. The real window was
+  # >>> 0.09 s - D6 ran at 35111 edge/s that capture - which is one frame
+  # >>> period and makes any provoked run structurally impossible. The six-pin
+  # >>> image also browned the device out on its first boot and was rolled
+  # >>> back; see the run log. Re-add both entries only for another
+  # >>> net-identity question, and check the boot banner's "compiled on"
+  # >>> timestamp afterwards.
+  pins:
+    # D3 (GPIO21) AND D4 (GPIO22) ARE OUT OF THE TAP FROM RUN 11. Re-add both
+    # entries once the wires are reseated - they are not being written off, they
+    # are being excluded as broken instruments.
+    #
+    # They are floating, and run 10 showed the damage is worse than dirty rows.
+    # Run 10a caught them plainly: 3657 and 1098 edges of 50 Hz mains pickup,
+    # 100% solitary, ZERO coincident edges with anything including each other.
+    # Two independent antennas.
+    #
+    # Then in 10c they printed "static LOW, 0 edges" while the buffer STILL
+    # filled - 16384 samples in 11.42 s from a header that produced 96 edges in
+    # total. They were chattering faster than the ISR could resolve: the
+    # interrupt fires and stores a sample, but by the time REG_READ runs the
+    # line is back where it was. So they burn the buffer while contributing
+    # nothing, and their own "static LOW" row is an artifact of the same effect.
+    #
+    # That is not a cosmetic problem. It set the capture window (11 s instead of
+    # the full 60 s) and it supplied 16383 samples of noise as the DENOMINATOR
+    # for the net-identity percentages. A broken input does not just add a bad
+    # row; it degrades every measurement that is normalised against the capture.
+    - pin:
+        number: GPIO23
+        mode:
+          input: true
+      label: "D5"
+    # D6 (GPIO16) IS BACK IN THE TAP FROM RUN 15. Run 14 took it out and that
+    # was a mistake worth leaving written down, because it is a subtle one.
+    #
+    # D6 is not just another line under test - it is the PRESS WITNESS. It is
+    # the only tapped line known to respond to the MODE injection (120 ms high,
+    # reproduced three times), so it is what proves the stimulus reached the
+    # board. Run 14 removed it to stop it flooding the buffer, and got two
+    # clean 30 s captures showing D5/D9/D10 with ZERO edges under press.
+    #
+    # That result is uninterpretable. "The lines did not respond" and "the
+    # press never arrived" produce identical reports once the witness is gone,
+    # and there is a live reason to suspect the second: the MODE injection
+    # returns its current through the ground bond, and D6's behaviour changed
+    # at exactly the moment USB was disconnected. Removing the control from an
+    # experiment because it was noisy is how a null result gets manufactured.
+    #
+    # The buffer cost is real and is accepted: D6 closes the window at ~0.93 s.
+    # That is still enough, because the press fires 50 ms after arming and the
+    # response lands within ~200 ms - run 13 caught the whole first press-and-
+    # response cycle on all four lines in exactly that window. The remaining
+    # three presses fall outside the capture and serve only to restore the
+    # panel's mode, which is fine; they were never the measurement.
+    #
+    # D6 free-runs at 5000-9000 edge/s, which fills the 16384-sample buffer in
+    # 0.93 s. The press sequence takes 4 x 720 ms = 2.9 s, so run 13 captured
+    # ONE press and D5/D9/D10 recorded 4-6 edges between them. Exactly the
+    # failure D3/D4 caused, except this time the flooding line is carrying real
+    # traffic rather than noise. A tap cannot be simultaneously optimised for a
+    # 6000 edge/s line and a 6 edge/capture line; it has to be split.
+    #
+    # What D6 already established, reproduced three times across two different
+    # gap settings, so nothing is lost by resting it:
+    #
+    #   max_hi 120033 us (run 10b, 300 ms gaps)
+    #   max_hi 119955 us (run 10c, 300 ms gaps)
+    #   max_hi 119959 us (run 13,  600 ms gaps)
+    #   commanded press   120 ms
+    #
+    # plus a free-running ~90.5 ms burst period matching the display frame
+    # rate. Re-add this entry for a D6-only run; do not re-add it alongside the
+    # quiet lines.
+    #
+    # (GPIO16 is also UART0 TX - see the hazard note in the banner at the top.
+    # Ruled out as the source of D6's traffic in run 11 on polarity: a UART TX
+    # idles HIGH and D6 idles LOW.
+    #
+    # Being in the tap also PINS GPIO16 as an input. Left out of the pin list
+    # it reverts to its ROM default, which is UART0 TX - an output, pointed at
+    # a pump-board line. Another reason not to drop it casually.)
+    - pin:
+        number: GPIO16
+        mode:
+          input: true
+      label: "D6"
+    - pin:
+        number: GPIO20
+        mode:
+          input: true
+      label: "D9"
+    - pin:
+        number: GPIO18
+        mode:
+          input: true
+      label: "D10"
+
+  verdict:
+    name: "Sweep Verdict"
+
+# --- Provoking the board ----------------------------------------------------
+#
+# Runs 1-9 all shared one blind spot, and it is the kind that produces
+# confident wrong answers rather than obvious failures: NOTHING WAS DONE TO THE
+# BOARD DURING THE CAPTURE. Every one of those runs measured an idle panel.
+#
+# For the clock/data question that did not matter, because the display bus
+# free-runs - it was pushing 5256 edge/s in run 9's own buffer while four of
+# the six logged zero edges, and a line on the clock's net cannot be quiet
+# while the clock is talking. That conclusion stands and needs no button press.
+#
+# For "what ARE these six", it matters completely. Four pulled-up lines with no
+# traffic is exactly what a button input looks like when nobody is pressing the
+# button, and equally what a dead test header looks like. Only stimulus
+# separates them, and the earlier advice - "press Re-run Sweep, then go work
+# the pump's controls" - could never work: the window is under three seconds
+# and a human cannot arm a sweep in Home Assistant and then reach the panel
+# inside it.
+#
+# So the firmware presses the button itself, on a fixed schedule, inside a
+# window it opened. The press is guaranteed to land rather than hoped for, and
+# the timing is recorded rather than recalled.
+#
+# The electrical reasoning for shorting D7 to D8 open-drain is in live.yaml and
+# is not repeated here; this is the same circuit driven by a different caller.
+output:
+  - platform: gpio
+    id: mode_line_a
+    pin:
+      number: ${mode_pin_a}
+      mode:
+        output: true
+        open_drain: true
+      # `turn_on` means pressed; the released state is high-Z, so no phantom
+      # press through boot, OTA or a watchdog reset.
+      inverted: true
+
+  - platform: gpio
+    id: mode_line_b
+    pin:
+      number: ${mode_pin_b}
+      mode:
+        output: true
+        open_drain: true
+      inverted: true
+
+script:
+  - id: press_mode
+    mode: single
+    then:
+      # Timestamps the COMMAND, which is a different fact from the board having
+      # received it, and separating those two is the whole point.
+      #
+      # Run 14 could not tell "D5/D9/D10 did not respond" from "the press never
+      # arrived", because the only evidence either way was D6 and D6 had been
+      # removed from the tap. These lines cost no buffer and no interrupts, and
+      # they pin down the ESP's half of the question absolutely: if the log
+      # shows four presses and D6 shows no 120 ms pulse, the fault is between
+      # the GPIO and the switch - wiring or the ground bond - and not in the
+      # firmware.
+      - logger.log:
+          level: WARN
+          format: "MODE press: contact CLOSED"
+      - output.turn_on: mode_line_a
+      - output.turn_on: mode_line_b
+      - delay: ${mode_press_ms}
+      - output.turn_off: mode_line_a
+      - output.turn_off: mode_line_b
+      - logger.log:
+          level: WARN
+          format: "MODE press: contact OPEN after %u ms"
+          args: ["(unsigned) ${mode_press_ms_int}"]
+      - delay: ${mode_gap_ms}
+
+  # Arm, then press - in that order, and that is the whole point of the script
+  # existing rather than the two being separate buttons.
+  - id: sweep_provoked
+    mode: single
+    then:
+      - lambda: "id(header_sweep).start_capture();"
+      # Long enough for start_capture() to have re-armed the ISR and cleared
+      # the stats, short enough that the press is near the front of the window
+      # rather than racing its end. The whole sequence must fit inside the
+      # capture, so it starts as early as it safely can.
+      - delay: 50ms
+      - repeat:
+          count: ${mode_presses}
+          then:
+            # execute-then-wait, not just execute: `press_mode` is mode single,
+            # so firing it again while it runs would be silently DROPPED and
+            # the loop would collapse to one press with three no-ops.
+            - script.execute: press_mode
+            - script.wait: press_mode
+
+# Re-arm on a timer, so the sweep produces a TIME SERIES rather than a single
+# reading taken 15 s after boot.
+#
+# Added because the one-shot boot capture turned out to be a trap. Run 10a said
+# D6 was static with zero edges; run 11, on identical firmware and wiring, said
+# 6124 edges at 6757/s. Both were true when taken. A header that changes
+# behaviour between captures cannot be characterised by one capture, and
+# nothing in the earlier reports would have revealed that - they would just
+# have disagreed with each other and one would have been believed.
+#
+# DELIBERATELY NO MODE PRESS HERE. This re-arms only, so it is safe to leave
+# running unattended: the pump is never actuated, and the periodic report is a
+# pure observation. Exercising the board stays on the button, where a human
+# decides each time.
+interval:
+  - interval: 60s
+    then:
+      - lambda: "id(header_sweep).start_capture();"
+
+button:
+  # The exercised run. One click does arm -> press x4 -> report, with the
+  # presses provably inside the capture window.
+  - platform: template
+    name: "Sweep With MODE Presses"
+    icon: mdi:gesture-tap-button
+    entity_category: diagnostic
+    on_press:
+      - script.execute: sweep_provoked
+
+  # The unexercised run, kept as the control. The automatic capture after
+  # settle_delay is also unexercised, so every boot yields an idle baseline for
+  # free and the provoked run is read as a DIFFERENCE against it. A line that
+  # is static in both is static; a line that moves only in the provoked run is
+  # a button or status line and is the find.
+  - platform: template
+    name: "Re-run Sweep"
+    entity_category: diagnostic
+    on_press:
+      - lambda: "id(header_sweep).start_capture();"
+
+  # Restores the panel by hand if a sequence is interrupted mid-cycle - an OTA
+  # or a reset between presses leaves the pump one or two modes advanced, and
+  # this firmware cannot read the display to notice.
+  - platform: template
+    name: "Press MODE"
+    icon: mdi:gesture-tap-button
+    entity_category: diagnostic
+    on_press:
+      - script.execute: press_mode

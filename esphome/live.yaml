@@ -1,0 +1,493 @@
+# Live decode - watch the pump's display change as you press its buttons.
+#
+# This is the follow-on to sweep.yaml. The sweep identified the bus:
+#
+#   VERDICT: CLOCKED  CLK=D1/rise  DATA=D2  MSB-first  (165 B)
+#   decoded: ... Standby Mode ... Standby Mode ...
+#
+# reproduced across three captures. Those pins are hardcoded below. If the
+# wiring changes, re-run sweep.yaml rather than guessing here.
+#
+# =========================== READ THIS FIRST ===============================
+#
+# Two of the ten LCD header pins must NEVER sit on an ESP32-C6 GPIO:
+#
+#   LCD pin 1   measured +4.87 V   VDD. C6 GPIOs are not 5 V tolerant.
+#   LCD pin 0   measured -1.53 V   V0/VEE contrast bias. A negative rail
+#                                  forward-biases the substrate diode.
+#
+# This firmware only taps D1 and D2, so if the other eight wires are off the
+# XIAO the question is moot. If they are still connected, the rails are
+# clamping through the protection diodes whether or not anything reads them.
+#
+# ============================================================================
+#
+# --- Why this exists separately from sweep.yaml ----------------------------
+#
+# The sweep is one-shot: it fills its buffer in about 0.4 s and then spends
+# seconds analysing. A button press would essentially never land inside that
+# window, and outstanding item 4 in sweep.yaml's run log - "no run yet has had
+# the pump's buttons worked during the capture window" - is not fixable by
+# timing the press better. It needs a decoder that never stops.
+#
+# So this one runs continuously. It frames on the idle gap between refreshes,
+# decodes each frame, and logs it ONLY when the content differs from the
+# previous frame. The panel refreshes about ten times a second; without the
+# repeat suppression the log would be a wall of identical lines and the one
+# thing being watched for - a change - would scroll past unread.
+#
+# --- How to use it ---------------------------------------------------------
+#
+#   1. Flash with logs attached. Do NOT use --no-logs and reconnect after:
+#      run 7 of the sweep was lost exactly that way, because the log is not
+#      replayed across a reconnect.
+#
+#        Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+#        .\.venv\Scripts\python.exe -m esphome run esphome\live.yaml --device COM3
+#
+#   2. Wait for the first frame to print. That is the current screen. An
+#      unchanged screen is re-printed every 10 s, so silence means no traffic,
+#      not a suppressed repeat.
+#   3. Press a button on the pump. A new line should appear within ~100 ms.
+#
+# --- Reading the output ----------------------------------------------------
+#
+#   [  Standby Mode  ][                ]
+#
+# One bracket per display line, exactly as the panel shows it, padding and
+# all. A '?' is a character that decoded outside printable ASCII - almost
+# always a slipped clock edge, and it stays in its column so a one-cell glitch
+# reads as a glitch rather than silently shortening the line. DEBUG adds the
+# raw frame hex, the held-frame counts and 30 s statistics.
+#
+# --- The protocol, as measured ---------------------------------------------
+#
+# 10 frames/s, 376 bits each, 0 dropped samples over minutes of capture.
+#
+#   9-bit words     one flag bit, then eight data bits MSB-first
+#   7C 40           introduces a display line; 16 character words follow
+#   line 2          starts TWO BITS out of phase with line 1
+#
+# That last point is the whole reason a fixed alignment cannot work, and it is
+# what defeated the sweep: assuming 8-bit words, every ninth bit shifts the
+# stream, so text appeared only when a run happened to start on a lucky
+# alignment. The frame also carries a leading word group and an inter-line
+# group that are not yet identified - they are skipped, not decoded.
+#
+# --- Run log ---------------------------------------------------------------
+#
+# Record what each button does here. That mapping is the point of this
+# firmware and is not recoverable from anywhere else.
+#
+# --- Run 1, 2026-09-18, one button press -----------------------------------
+#
+#   before   [   Time Mode    ][    NOT SET     ]
+#   after    [  Standby Mode  ][                ]
+#
+# Also observed in the same session:
+#
+#            [   Always On    ][Not Recommended ]
+#
+# Which physical button was pressed was not recorded.
+#
+# --- Run 2, 2026-09-18, debounced build ------------------------------------
+#
+# stable_frames: 2 added after run 1 logged spurious changes from single-bit
+# corruption ("Sta~dby Mode", a stray backtick in line 2). It works: 2.5 min
+# at 10.0 frames/s, 572k edges, 0 dropped, 0 undecoded, 23 garbled cells, and
+# not one spurious change line. Every one of those 23 would have printed a
+# bogus screen under run 1's build.
+#
+# Button mapping, one press at a time. MODE walks a cycle:
+#
+#   MODE x1   [  Standby Mode  ]  ->  [ Automatic Mode ]
+#   MODE x1   [ Automatic Mode ]  ->  [   Time Mode    ]
+#   MODE x1   [   Time Mode    ]  ->  [   Always On    ]
+#   MODE x1   [   Always On    ]  ->  [  Standby Mode  ]   wraps
+#
+# Four positions, every leg measured. Standby, Automatic, Time, Always On.
+#
+# Run 1's [Time Mode][NOT SET] -> [Standby Mode] looked like a contradiction
+# until the wrap was measured. It is not: run 1 also saw Always On in the same
+# session, so its two logged lines were not adjacent presses - the Always On
+# step sat between them. Two log lines being consecutive in the log does not
+# make them consecutive in the panel's state machine.
+#
+# A press is not one screen change. Pressing MODE into Time Mode produced:
+#
+#   +0.0 s   [   Time Mode    ][                ]   title flash
+#   +0.8 s   [Time Now   00:00][Save  Set   Exit]   menu opens by itself
+#   +21 s    [   Time Mode    ][    NOT SET     ]   menu times out by itself
+#
+# Only the first is the button. Attributing the later two to a press would be
+# wrong, and they arrive slowly enough to look like separate presses.
+#
+# Distinguishing a change from the 10 s re-print: a change prints off-cadence.
+# The first MODE press landed at :57.686 with re-prints running on :49 and :59.
+#
+# --- The panel truncates the frame rather than sending a blank line ---------
+#
+# About 30 s after settling in Automatic Mode the frame halved, 382 bits to
+# 191, and held there for 303 frames:
+#
+#   382 bits | 7C 40 ... 51 00 F8 80 60 0F 84 01 00 80 40 ... 02 00
+#   191 bits | 7C 40 ... 51 00
+#
+# So a screen with no second line is a SHORT FRAME, not a frame carrying 16
+# spaces - and both occur. [ Automatic Mode ] with one line and
+# [ Automatic Mode ][                ] are different panel states, not a
+# decode glitch. Anything that assumes a fixed frame length breaks here.
+#
+# --- Line 2 of the Always On screen BLINKS at 1 Hz --------------------------
+#
+#   [   Always On    ][Not Recommended ]   5 frames
+#   [   Always On    ][                ]   5 frames, repeating
+#
+# 500 ms per half at 10 frames/s. The panel, not the decoder: the second
+# half-frame alternates between two fixed byte patterns of identical length,
+#
+#   84 02 71 BC E8 20 29 19 4C 66 F3 69 B4 CA 6E 32 19 4C 82 00   "Not Recommended"
+#   84 01 00 80 40 20 10 08 04 02 01 00 80 40 20 10 08 04 02 00   blank
+#
+# with the first half byte-identical throughout. It is a flashing warning
+# about running the pump permanently on.
+#
+# Consequence for any consumer of this data: a blinking screen publishes a
+# text_sensor change every 500 ms forever. stable_frames cannot fix that -
+# the blink is stable, it is real. Anything downstream needs to either hold
+# the last non-blank line 2 or treat a 1 Hz alternation as one state.
+#
+# === Run 3, 2026-09-18: published to Home Assistant ==========================
+#
+# Added `blank_hold` and trimming, flashed, and read the entity values back
+# off the device's own web server rather than off the log, so what is checked
+# is what HA will actually receive:
+#
+#   text_sensor/Display Line 1  value "Standby Mode"   (not "  Standby Mode  ")
+#   text_sensor/Display Line 2  value ""
+#
+# Both correct. Line 2 is the 16-space blank of a full 382-bit Standby frame,
+# so it is a REAL blank, and it published - the hold delays a true blank by
+# 1.5 s, it does not swallow it. Blink suppression on the Always On screen is
+# implemented against the byte patterns recorded above but has not yet been
+# watched live; that needs a physical walk round to Always On.
+#
+# --- Unexpected: the web server costs frames --------------------------------
+#
+# Steady state on this run was `0 dropped`. Holding the web server's /events
+# SSE stream open took it to `16.1 frames/s, 277 dropped, 54 garbled` - the
+# frame rate fell by 80% and the ISR started losing edges. One 160 MHz core is
+# serving an interrupt at ~3.8 kedges/s and streaming HTTP, and the HTTP wins.
+#
+# So: do not leave a browser sitting on http://<device>/ while capturing. The
+# native API is a binary push and does not show this, which is the reason HA
+# is a fine consumer of this data and the web UI is a debugging tool only. If
+# dropped samples ever appear during real protocol work, check for an open
+# web page before suspecting the wiring.
+#
+# === Run 4, 2026-09-19: six pin sensors added, and a WIRING REGRESSION =======
+#
+# The six pin binary sensors cost the tap nothing, exactly as intended:
+#
+#   10.0 frames/s, 0 dropped, sustained over 3.5 minutes
+#
+# use_interrupt: false is what buys that - see the comment on the block itself.
+#
+# --- But the decode quality has fallen off a cliff since run 2 --------------
+#
+#   run 2    2.5 min, 572k edges, 0 dropped, 0 undecoded,  23 garbled cells
+#   run 4    2.5 min, 520k edges, 0 dropped, 161 undecoded, 3156 garbled
+#
+# 23 garbled cells to over 3000 is not a drift, and the frame lengths say why.
+# The protocol is 382 bits, or 191 for a short frame. Observed in run 4:
+#
+#   397  396  395  337  321  300  290  279  bits
+#
+# Both directions at once: frames LONGER than 382 (extra clock edges - bounce)
+# and frames much shorter (missed edges). Several start with a run of FF FF FF,
+# which is a line sitting high through what should have been clocked data.
+#
+# --- The evidence points at the D2 (data) solder joint ----------------------
+#
+# Comparing the same two lines between sweep runs, which is the cleanest
+# like-for-like available because both are whole-port captures:
+#
+#              run 4-8 (2026-09-18)      run 9 (2026-09-19)
+#   D1 clock   6648 edge/s, 76% solo     5256 edge/s, 70% solo
+#   D2 data    1186 edge/s, 12% solo     2537 edge/s, 49% solo
+#
+# D2's edge rate more than DOUBLED and its solitary fraction went 12% -> 49%.
+# Solitary means the line changed with no other line changing in the same port
+# read. On a synchronous bus the data line moves next to its clock; that is
+# what the 12% was. Half its edges now arriving on their own is roughly 1000
+# extra transitions a second that no clock asked for. Display content cannot
+# explain a 4x change in that ratio.
+#
+# The likely cause is mechanical. D1 and D2 are hand-soldered to the display
+# and the board has been handled repeatedly to fit the six header wires. This
+# project has lost two runs to a loose wire already.
+#
+# NOT caused by the binary sensors. The degraded D2 numbers above were measured
+# by sweep.yaml, which contains no binary_sensor block at all. The regression
+# predates this firmware.
+#
+# ACTION: reflow or reseat D1 and D2 and re-run. Until then, treat garbled
+# cells as a wiring fault rather than a decoder defect - the text still comes
+# out right, but the margin is gone.
+
+substitutions:
+  # The node name stays `-live` so this can coexist on the network with
+  # anything flashed from the superseded hauswasserwerk.yaml - two nodes
+  # claiming one mDNS hostname is a genuinely confusing failure. The friendly
+  # name is what Home Assistant shows and what entity IDs are built from, and
+  # there is no reason for "Live" to leak into those.
+  name: hauswasserwerk-live
+  friendly_name: Hauswasserwerk
+
+  # The two wires across the MODE switch, left on the XIAO from the sweep.
+  # GPIO16/17 are UART0 TX/RX at ROM level, but the logger is on
+  # USB_SERIAL_JTAG so nothing here contends for them - and GPIO17 is the RX
+  # side, an input, so even the ROM bootloader does not drive it.
+  mode_pin_a: GPIO17 # D7
+  mode_pin_b: GPIO19 # D8
+
+  # The README specifies 100-120 ms for button injection. Long enough that the
+  # panel's own debounce accepts it, short enough not to read as a press-hold.
+  mode_press_ms: 120ms
+
+packages:
+  common: !include common.yaml
+
+clocked_tap:
+  id: lcd_serial
+
+  # XIAO silkscreen D1 and D2. Which LCD header position each one is on is
+  # still unrecorded - that needs the meter - but it does not matter for
+  # decoding, only for reproducing the wiring.
+  clock_pin:
+    number: GPIO1
+    mode:
+      input: true
+  data_pin:
+    number: GPIO2
+    mode:
+      input: true
+
+  # From the sweep: D1 idles high with ~11 us low pulses, so the data line is
+  # valid on the rising edge. MSB-first is what produced "Standby Mode".
+  edge: rising
+  bit_order: msb_first
+
+  # D1's measured gap histogram is sharply bimodal - intra-frame clock gaps
+  # top out around 64 us, frames are up to 90 ms apart. 1 ms sits in the empty
+  # middle, 16x above the fastest gap and 32x below the slowest, so framing is
+  # not sensitive to this number.
+  frame_gap: 1ms
+
+  # NINE bits per word, not eight: one flag bit then the byte, MSB-first. This
+  # is why the sweep could never render the screen - it assumed 8-bit words, so
+  # every ninth bit shifted the whole stream and the text only survived in
+  # whichever run happened to land on a lucky alignment.
+  word_bits: 9
+
+  # Each display line is introduced by payload bytes 7C 40. Read off a captured
+  # frame; it is the only thing that appears exactly once per line. The decoder
+  # hunts this at every bit position, which is what lets it render both lines -
+  # in the measured frame, line 2 starts two bits out of phase with line 1.
+  line_marker: [0x7C, 0x40]
+  columns: 16
+
+  # The 1 Hz blink documented above, handled. A line going blank has to STAY
+  # blank for this long before the blank is published to Home Assistant, so
+  # the Always On warning's 500 ms off-half never reaches the recorder while a
+  # genuine blank line - Standby Mode's second line - still gets through, just
+  # 1.5 s late. The log is untouched by this and keeps showing the blink.
+  blank_hold: 1500ms
+
+  # Set true to log every frame including repeats. Useful for measuring the
+  # refresh rate, far too chatty to watch a button press through.
+  log_repeats: false
+
+  # What Home Assistant gets. Published values are trimmed of the panel's
+  # centring spaces; the log stays padded and verbatim, because protocol work
+  # needs to see the real 16 columns.
+  #
+  # Two lines, published as they are read. There is deliberately no "Pump
+  # Mode" entity here, because line 1 is not always a mode - on the Time
+  # screen it reads `Time Now   00:00`. Anything that maps text to a mode is a
+  # guess about panel behaviour, and it belongs in a Home Assistant template
+  # where it can be fixed without a reflash, not baked into firmware.
+  line_1:
+    name: "Display Line 1"
+    icon: mdi:format-text
+  line_2:
+    name: "Display Line 2"
+    icon: mdi:format-text
+
+# --- MODE button injection --------------------------------------------------
+#
+# Presses the panel's MODE button by shorting the wires on XIAO D7 and D8,
+# which are the switch's own two terminals. Metered: one side sits at 3.3 V,
+# the other at 0 V.
+#
+# That 0 V side is the whole reason this needs no extra parts. "Short D7 to D8"
+# and "pull the 3.3 V side down to 0 V" are the same electrical event, and a
+# GPIO can do the second one by itself. Without a grounded side it could not -
+# a GPIO can only connect a line to one of its own rails, never to another
+# line, which is what an isolated switch part would have been for.
+#
+# OPEN DRAIN IS THE SAFETY PROPERTY, not a style preference. An open-drain pin
+# can only ever sink. It cannot put 3.3 V onto a line the pump's MCU is
+# driving, so the worst case if a wire is on the wrong pad is a pin held low,
+# not two push-pull drivers fighting.
+#
+# BOTH pins are driven, because which of the two is the 3.3 V side was not
+# recorded and the sweep could not tell - it read D7 and D8 as noise, 87% and
+# 96% solitary edges, which is what an open switch looks like from a
+# high-impedance input. Pulling the grounded one to ground is a no-op, so
+# driving the pair together is correct without knowing which is which. Once
+# metered, delete the other from the script below.
+#
+# The press current returns through the existing 0 V bond, not directly
+# between the two pads. It is pull-up current, sub-milliamp.
+output:
+  - platform: gpio
+    id: mode_line_a
+    pin:
+      number: ${mode_pin_a}
+      mode:
+        output: true
+        open_drain: true
+      # So that `turn_on` means "pressed". The off state ESPHome writes at
+      # setup then releases the line rather than pulling it down, and the pin
+      # is a plain high-Z input before that - no phantom press through boot,
+      # OTA or a watchdog reset.
+      inverted: true
+
+  - platform: gpio
+    id: mode_line_b
+    pin:
+      number: ${mode_pin_b}
+      mode:
+        output: true
+        open_drain: true
+      inverted: true
+
+script:
+  - id: press_mode
+    # `single` drops an overlapping run rather than queueing it, so a double
+    # click in the HA UI cannot stack two presses or leave the line held low
+    # by one run while the other releases it.
+    mode: single
+    then:
+      - output.turn_on: mode_line_a
+      - output.turn_on: mode_line_b
+      - delay: ${mode_press_ms}
+      - output.turn_off: mode_line_a
+      - output.turn_off: mode_line_b
+      # The panel is not done when the contact opens. A press into Time Mode
+      # produces three screens over 21 s as its menu opens and times out, and
+      # the mode only advances one position per press. Holding the script busy
+      # briefly keeps a rattled button from outrunning the display.
+      - delay: 400ms
+
+button:
+  - platform: template
+    name: "Press MODE"
+    icon: mdi:gesture-tap-button
+    on_press:
+      - script.execute: press_mode
+
+# The six easy pins on the connector near the display, exposed raw.
+#
+# This is the other half of the 6-pin investigation, and it covers what
+# sweep.yaml structurally cannot. The sweep's buffer fills in a fraction of a
+# second, so a human reaching for a front-panel button will never land inside
+# its window. Here the state just sits in Home Assistant: press every control
+# on the pump in turn, let it run, and watch which row flips.
+#
+# HOW TO READ A FROZEN ROW. delayed_on_off makes a line publish only after it
+# has HELD a level for 100 ms. That is not just debounce:
+#
+#   a button press lasts hundreds of ms   -> fully visible
+#   a 6 kHz bus line never holds 100 ms   -> publishes NOTHING, sits frozen
+#                                            at whatever it read at boot
+#
+# So a row that never moves is ambiguous by design - static line OR fast bus -
+# and the sweep is what tells those apart. It is the right trade here: without
+# the filter a line sharing a net with the clock would write thousands of
+# states a second into HA's recorder.
+#
+# use_interrupt: false is NOT a detail. ESPHome's gpio binary_sensor defaults
+# to use_interrupt: true, which would attach an any-edge ISR to each of these
+# six. If one of them turns out to share a net with the display clock, that is
+# 6650 extra interrupts a second landing on the same core as clocked_tap's own
+# ISR - and the tap is already sensitive enough that a held-open web UI dropped
+# it from 90 frames/s to 16. Polling costs a few register reads per loop() and
+# loses nothing here, because delayed_on_off has already thrown away everything
+# faster than 100 ms.
+#
+# Watch the frame-rate line in the log after flashing anyway. If it fell, this
+# block is the first thing to remove.
+binary_sensor:
+  - platform: gpio
+    name: "Pin D3"
+    pin: {number: GPIO21, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+  - platform: gpio
+    name: "Pin D4"
+    pin: {number: GPIO22, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+  - platform: gpio
+    name: "Pin D5"
+    pin: {number: GPIO23, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+  # GPIO16 is UART0 TX. Harmless as an input, but the mask-ROM bootloader
+  # drives it at 115200 at every reset, before any firmware runs - so the ESP
+  # injects a short serial burst into this pump-board line on every power-up
+  # and every OTA. Nothing in ESPHome can suppress that. If the pump ever
+  # misbehaves right after an ESP reset, move this wire to D0 (GPIO0).
+  - platform: gpio
+    name: "Pin D6"
+    pin: {number: GPIO16, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+  - platform: gpio
+    name: "Pin D9"
+    pin: {number: GPIO20, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+  - platform: gpio
+    name: "Pin D10"
+    pin: {number: GPIO18, mode: {input: true}}
+    entity_category: diagnostic
+    use_interrupt: false
+    filters: [delayed_on_off: 100ms]
+
+# DEBUG globally so clocked_tap emits the per-frame hex dump, the repeat
+# counts and the 30 s edge statistics - the hex is what any further protocol
+# work has to be done against. Everything that would otherwise bury those is
+# pinned back to INFO by tag; WiFi in particular logs every scan result.
+# Drop the whole thing to `level: INFO` once the decode is settled and the
+# only thing being watched is the text.
+logger:
+  level: DEBUG
+  logs:
+    wifi: INFO
+    wifi_esp32: INFO
+    api: INFO
+    api.service: INFO
+    component: INFO
+    scheduler: INFO
+    sensor: INFO
+    text_sensor: INFO
+    mdns: INFO
+    web_server: INFO

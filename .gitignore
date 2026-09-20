@@ -58,3 +58,4 @@ desktop.ini
 
 # Personal permission grants. A shared .claude/settings.json stays tracked.
 .claude/settings.local.json
+sweep_run5.log
