@@ -299,10 +299,21 @@ void ClockedTap::publish_lines_() {
     if (sensors[l] == nullptr)
       continue;
 
-    // A line the frame did not carry is blank, not stale. The panel truncates
-    // the frame instead of sending spaces when it draws only one line, so
-    // without this the entity would hold the previous screen's text forever.
-    const std::string text = (l < this->nlines_) ? trimmed(this->lines_[l]) : std::string();
+    // Option A (hold on short frame): a line the frame did NOT carry is HELD,
+    // not blanked. Verified against real frames: a screen whose row 2 is static
+    // and not being refreshed (e.g. Automatic + "Check Water") is sent as a
+    // 191-bit SHORT frame with only a line-1 marker, while a row the panel is
+    // actively drawing - including a genuine blank (Standby, or the "Always On"
+    // blink off-half) - arrives as a full 382-bit frame with a present-but-empty
+    // line 2. So: absent => hold last value; present-but-empty => blank via the
+    // existing blank_hold timer. This keeps a static warning visible in HA the
+    // same way the physical LCD retains it in DDRAM.
+    const bool present = (l < this->nlines_);
+    if (!present) {
+      this->blank_since_[l] = 0;  // cancel any pending blank; keep current value
+      continue;
+    }
+    const std::string text = trimmed(this->lines_[l]);
 
     if (!text.empty()) {
       this->blank_since_[l] = 0;

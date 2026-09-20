@@ -318,9 +318,11 @@ clocked_tap:
   # guess about panel behaviour, and it belongs in a Home Assistant template
   # where it can be fixed without a reflash, not baked into firmware.
   line_1:
+    id: disp_line_1
     name: "Display Line 1"
     icon: mdi:format-text
   line_2:
+    id: disp_line_2
     name: "Display Line 2"
     icon: mdi:format-text
 
@@ -491,3 +493,13 @@ logger:
     text_sensor: INFO
     mdns: INFO
     web_server: INFO
+
+# Combined single entity for the device page (a Lovelace card cannot live there).
+text_sensor:
+  - platform: template
+    name: "Display"
+    id: disp_combined
+    icon: mdi:monitor
+    update_interval: 2s
+    lambda: |-
+      return {id(disp_line_1).state + "\n" + id(disp_line_2).state};
