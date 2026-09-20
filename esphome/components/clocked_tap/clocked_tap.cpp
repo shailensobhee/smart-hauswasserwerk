@@ -79,6 +79,42 @@ void ClockedTap::setup() {
 
   this->last_edge_ms_ = millis();
   this->last_stats_ms_ = this->last_edge_ms_;
+
+  this->restore_persist_();
+}
+
+// Persist under a fixed hash so the slot is stable across reboots. Restore any
+// saved lines and publish them immediately, so a device that rebooted while a
+// warning stood comes up showing that warning instead of blank.
+void ClockedTap::restore_persist_() {
+  this->pref_ = global_preferences->make_preference<PersistState>(0x7C40C0DEu);
+  PersistState st{};
+  if (!this->pref_.load(&st))
+    return;
+  text_sensor::TextSensor *sensors[2] = {this->line_1_, this->line_2_};
+  for (uint8_t l = 0; l < 2; l++) {
+    if (!st.valid[l])
+      continue;
+    st.line[l][MAX_COLUMNS] = '\0';  // defensive: guarantee termination
+    std::string text(st.line[l]);
+    this->published_[l] = text;
+    this->have_published_[l] = true;
+    if (sensors[l] != nullptr) {
+      sensors[l]->publish_state(text);
+      ESP_LOGI(TAG, "Restored line %u from flash: '%s'", (unsigned) (l + 1), text.c_str());
+    }
+  }
+}
+
+// Called only when a published line actually changes, never per frame.
+void ClockedTap::save_persist_() {
+  PersistState st{};
+  for (uint8_t l = 0; l < 2; l++) {
+    st.valid[l] = this->have_published_[l] ? 1u : 0u;
+    std::strncpy(st.line[l], this->published_[l].c_str(), MAX_COLUMNS);
+    st.line[l][MAX_COLUMNS] = '\0';
+  }
+  this->pref_.save(&st);
 }
 
 void ClockedTap::loop() {
@@ -321,6 +357,7 @@ void ClockedTap::publish_lines_() {
         sensors[l]->publish_state(text);
         this->published_[l] = text;
         this->have_published_[l] = true;
+        this->save_persist_();
       }
       continue;
     }
@@ -344,6 +381,7 @@ void ClockedTap::flush_blanks_() {
     this->published_[l].clear();
     this->have_published_[l] = true;
     this->blank_since_[l] = 0;
+    this->save_persist_();
   }
 }
 

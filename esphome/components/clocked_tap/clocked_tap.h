@@ -4,6 +4,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome {
@@ -144,6 +145,26 @@ class ClockedTap : public Component {
   std::string published_[2];
   bool have_published_[2]{};
   uint32_t blank_since_[2]{};
+
+  // --- Flash persistence of the last published lines ------------------------
+  //
+  // The tap is passive: it only ever sees a row when the panel TRANSMITS it,
+  // and the panel writes a row only when it changes. A standing warning like
+  // "Check Water" is written once and then never re-sent, held only in the
+  // LCD's own DDRAM. So if the ESP reboots (OTA, power blip) while that warning
+  // stands, the decoder comes up blank and can never recover it - the write
+  // already happened. Persisting the published lines to flash and restoring
+  // them on boot closes that gap: a reboot resumes the last-seen screen instead
+  // of losing it. Saved only on an actual change (never per-frame) to spare the
+  // flash. A 382-bit full-frame write still overrides a restored value the
+  // instant the panel next redraws the row, so a stale restore is self-healing.
+  struct PersistState {
+    char line[2][MAX_COLUMNS + 1];
+    uint8_t valid[2];
+  };
+  ESPPreferenceObject pref_;
+  void save_persist_();
+  void restore_persist_();
 
   uint32_t frames_{0};
   uint32_t undecoded_{0};
