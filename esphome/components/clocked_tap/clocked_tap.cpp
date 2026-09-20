@@ -249,9 +249,6 @@ void ClockedTap::end_frame_() {
 
   if (this->nlines_ == 0) {
     this->undecoded_++;
-    // Quiet by default: a handful of undecodable frames among thousands is
-    // ordinary. The 30 s statistics line carries the count, and the hex is
-    // there for anyone chasing it.
     ESP_LOGV(TAG, "no line marker in %u-bit frame", (unsigned) this->nbits_);
     this->nbits_ = 0;
     return;
@@ -281,7 +278,29 @@ void ClockedTap::end_frame_() {
   }
   const bool settled = this->pending_count_ >= this->stable_frames_;
 
-  if (!settled) {
+  // One-shot line-2 write bypass. The pump draws a standing warning like
+  // "Check Water" as a SINGLE full 382/387-bit frame, then immediately reverts
+  // to 191-bit line-1-only frames - so a changed line 2 never repeats and the
+  // stable_frames_ debounce (which exists to reject single-bit line-1 glitches)
+  // discards it forever. Fix: if this frame carries a non-empty line 2 that
+  // differs from what is published, accept it now (count=1). A corrupted frame
+  // faking a clean printable line-2 string that differs from the held value is
+  // far less likely than the debounce silently eating every real warning.
+  bool line2_appeared = false;
+  if (this->nlines_ >= 2) {
+    // Inline trim (the `trimmed` helper is defined further down the file).
+    const char *b2 = this->lines_[1];
+    while (*b2 == ' ')
+      b2++;
+    const char *e2 = b2 + strlen(b2);
+    while (e2 > b2 && e2[-1] == ' ')
+      e2--;
+    const std::string l2(b2, (size_t) (e2 - b2));
+    if (!l2.empty() && (!this->have_published_[1] || l2 != this->published_[1]))
+      line2_appeared = true;
+  }
+
+  if (!settled && !line2_appeared) {
     this->nbits_ = 0;
     return;
   }
