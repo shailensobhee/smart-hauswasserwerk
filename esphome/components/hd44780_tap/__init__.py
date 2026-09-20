@@ -18,7 +18,9 @@ from esphome.const import (
 )
 
 CODEOWNERS = ["@shailensobhee"]
-AUTO_LOAD = ["text_sensor", "sensor"]
+# hd44780_core carries the shared controller state machine, which bus_sweep
+# also replays. It has no configuration of its own.
+AUTO_LOAD = ["text_sensor", "sensor", "hd44780_core"]
 
 hd44780_tap_ns = cg.esphome_ns.namespace("hd44780_tap")
 HD44780Tap = hd44780_tap_ns.class_("HD44780Tap", cg.Component)

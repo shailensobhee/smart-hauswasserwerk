@@ -4,6 +4,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/hd44780_core/hd44780_decoder.h"
 
 namespace esphome {
 namespace hd44780_tap {
@@ -13,13 +14,6 @@ namespace hd44780_tap {
 // main loop is busy elsewhere.
 static const uint16_t RING_SIZE = 512;
 static const uint16_t RING_MASK = RING_SIZE - 1;
-
-// The HD44780 DDRAM is not contiguous: 0x00-0x27 backs line 1, 0x40-0x67 backs
-// line 2, and the auto-increment runs 0x27 -> 0x40 -> ... -> 0x67 -> 0x00.
-static const uint8_t DDRAM_SIZE = 0x68;
-static const uint8_t LINE_1_BASE = 0x00;
-static const uint8_t LINE_2_BASE = 0x40;
-static const uint8_t LINE_LEN = 40;
 
 /// One E-strobe observation: the whole GPIO input port, latched atomically.
 ///
@@ -59,14 +53,8 @@ class HD44780Tap : public Component {
 
  protected:
   void handle_sample_(const Sample &sample);
-  void handle_byte_(bool rs, uint8_t value);
-  void handle_command_(uint8_t cmd);
-  void handle_data_(uint8_t value);
-  void advance_address_();
-  void clear_display_();
   void publish_lines_();
   void publish_diagnostics_();
-  std::string render_line_(uint8_t base) const;
 
   InternalGPIOPin *e_pin_{nullptr};
   InternalGPIOPin *rs_pin_{nullptr};
@@ -98,15 +86,10 @@ class HD44780Tap : public Component {
   bool pending_rs_{false};
   uint32_t last_edge_us_{0};
 
-  // --- Reconstructed controller state ---
-  uint8_t ddram_[DDRAM_SIZE]{};
-  bool written_[DDRAM_SIZE]{};
-  uint8_t address_{0};
-  bool cgram_mode_{false};  ///< Set CGRAM Address diverts RS=1 writes off-screen
-  bool increment_{true};    ///< Entry-mode direction
-  uint8_t shift_{0};        ///< Display shift offset, modulo LINE_LEN
+  /// Reconstructed controller state. Shared with bus_sweep so the speculative
+  /// decodes there and the live decode here cannot disagree.
+  hd44780_core::Hd44780Decoder decoder_;
 
-  bool dirty_{false};
   uint32_t last_publish_ms_{0};
   uint32_t last_rate_ms_{0};
   uint32_t last_rate_edges_{0};
