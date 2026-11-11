@@ -2,6 +2,30 @@
 # THE PIN MAP RUN - which LCD header pin is CLK, which is DATA, which is GND
 # ============================================================================
 #
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !! SUPERSEDED 2026-11-11. DO NOT TAKE WIRING FROM THIS FILE.
+# !!
+# !! The answer, settled after this run and recorded in the README's physical
+# !! pin map and in project memory:
+# !!
+# !!     LCD header pin 1  =  CLOCK  ->  XIAO D0 / GPIO0   (rising edge)
+# !!     LCD header pin 2  =  DATA   ->  XIAO D2 / GPIO2
+# !!     LCD header pin 3  =  GND    ->  0 ohms to board ground, metered
+# !!
+# !! Two statements below are WRONG and are left in place only so the run
+# !! narrative still reads straight:
+# !!
+# !!   - "CLK on XIAO D1" (just below) described the OLD wiring, before the
+# !!     re-solder. GPIO1 is now on LCD pin 3, which is GROUND. Never drive it.
+# !!   - "pin 1  +4.87 V  VDD ... NEVER connect it" (further down) came from
+# !!     the discredited 2026-09 floating-reference table. A meter read pin 1
+# !!     at 3.17 V on 2026-11-11 - a 3.3 V-domain line, and exactly the DC
+# !!     average of a 3.3 V clock idling high. Pin 1 is the clock and is
+# !!     deliberately wired to D0.
+# !!
+# !! Standing rule this cost us: THE METER OUTRANKS ANY INHERITED TABLE.
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#
 # This file exists because the previous wiring's LCD-header positions were
 # never written down. The bus was decoded (CLK on XIAO D1, DATA on XIAO D2)
 # but nobody recorded which LCD pins those two wires came from, so the work
