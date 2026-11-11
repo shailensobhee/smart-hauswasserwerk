@@ -203,6 +203,14 @@ uint8_t ClockedTap::word_data_(uint16_t start) const {
 /// renders both. Resyncing on content is also what makes the decode survive the
 /// occasional slipped clock edge - a corrupted line costs that line, not the
 /// rest of the frame.
+///
+/// LINES ARE SLOTTED BY ORDER, NOT BY BIT OFFSET, and that is deliberate: the
+/// first marker found is line 1, the second is line 2, wherever they sit. The
+/// loop below does this naturally by appending to lines_[nlines_++], so do not
+/// "improve" it into an offset test. One frame in captures/2026-11-11-modewalk
+/// .txt carries its two markers at bits 1777 and 1968 instead of the usual 27
+/// and 218 - an idle gap inside the frame - and any absolute-offset rule drops
+/// a line there. tools/walk.py::read_slots() was fixed for exactly this.
 void ClockedTap::decode_frame_() {
   this->nlines_ = 0;
   const uint8_t wb = this->word_bits_;
@@ -368,6 +376,11 @@ void ClockedTap::publish_lines_() {
       this->blank_since_[l] = 0;  // cancel any pending blank; keep current value
       continue;
     }
+    // Reaffirmed 2026-11-11 against this project's own captures: Standby's
+    // blank line 2 is a real 16-space line inside a full 382-bit frame, while
+    // Automatic Mode held a 191-bit short frame for 303 consecutive frames
+    // with line 1 still lit. Blanking on the second case reports a line the
+    // panel is visibly showing. Standing project rule: always read BOTH lines.
     const std::string text = trimmed(this->lines_[l]);
 
     if (!text.empty()) {

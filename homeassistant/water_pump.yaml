@@ -1,0 +1,210 @@
+# Home Assistant template entities for the Parkside PHGA 1300 A1 pump.
+#
+# Paste into configuration.yaml, or keep this file and include it:
+#
+#     template: !include water_pump.yaml
+#
+# (If you already have a `template:` key, append these as list items instead.)
+#
+# --- Why the parsing lives HERE and not in the firmware ----------------------
+#
+# The ESPHome node deliberately publishes only two strings - the panel's two
+# lines, verbatim - and nothing that claims to know what they mean. Two
+# reasons, and both still hold:
+#
+#   1. Line 1 is NOT always a mode. On the time screen it reads
+#      `Time Now   00:00`. Anything that maps text to a state is a guess about
+#      panel behaviour.
+#   2. A guess that needs correcting should cost a YAML reload, not a reflash
+#      of a board that is inside a pump.
+#
+# So: the firmware reports what the glass says. This file decides what it
+# means. If a screen shows up that is parsed wrongly, fix it here.
+#
+# --- Entity IDs --------------------------------------------------------------
+#
+# These assume the ESPHome node's friendly_name is "Water Pump", giving
+# `sensor.water_pump_display_line_1` and `..._line_2`. That was renamed from
+# "Hauswasserwerk" on 2026-11-11; if you are still running the older firmware
+# the IDs will be `sensor.hauswasserwerk_display_line_*` instead. Check under
+# Settings -> Devices -> ESPHome. Get them wrong and every entity below
+# silently reads "unknown" rather than erroring.
+
+- sensor:
+    # The pump's operating mode, from line 1.
+    #
+    # The four modes are the MODE button's cycle, verified end to end by
+    # pressing it round twice:
+    #
+    #   Standby -> Automatic -> Time Mode -> Always On -> Standby
+    #
+    # `unknown` is a real and expected value, not a failure: while the Time
+    # menu is open line 1 shows a clock field, and the pump is still in Time
+    # Mode throughout. Do not write an automation that treats `unknown` as a
+    # fault.
+    - name: "Pump Mode"
+      unique_id: water_pump_mode
+      icon: mdi:water-pump
+      state: >-
+        {% set l1 = states('sensor.water_pump_display_line_1') %}
+        {% if 'Standby' in l1 %}Standby
+        {% elif 'Automatic' in l1 %}Automatic
+        {% elif 'Time Mode' in l1 %}Time Mode
+        {% elif 'Always On' in l1 %}Always On
+        {% else %}unknown
+        {% endif %}
+      attributes:
+        # Keep the raw lines on the entity so a surprising mode value can be
+        # explained from the history alone, without a live log.
+        line_1: "{{ states('sensor.water_pump_display_line_1') }}"
+        line_2: "{{ states('sensor.water_pump_display_line_2') }}"
+
+    # --- THE SOFT-KEY LABELS, and how the row is found -----------------------
+    #
+    # The three buttons are SOFT KEYS: the panel paints a label over each one
+    # and the meaning changes per screen. Measured 2026-11-11 by pressing each
+    # key and watching the effect:
+    #
+    #   screen                     left/SAVE   middle/SET   right/MODE
+    #   `Time Now 00:00` resting   Save        Set          Exit
+    #   editing digits             Next        +            -
+    #
+    # !! There is an open question about WHICH LINE carries the labels: on the
+    # resting screen they decode to line 2, on the edit screen to line 1. A
+    # physical LCD cannot move text between rows, so either the panel sends the
+    # rows in a different order on that screen or the decoder's order-based
+    # line slotting mis-assigns there. It is not settled.
+    #
+    # This sensor sidesteps the question entirely instead of betting on an
+    # answer: it looks at BOTH lines and takes whichever one actually contains
+    # soft labels. That is correct under either explanation, and it keeps
+    # working if the open question is later resolved the other way.
+    #
+    # The test is two-part, and both halves were needed:
+    #
+    #   1. three or more known labels - one would match ordinary text, and
+    #      every label row seen so far has exactly three.
+    #   2. at least one WORD label (Save/Next/Exit/Set), not just `+` and `-`.
+    #
+    # Part 2 is not belt-and-braces. Without it `Time On  --:--` scores four
+    # matches on its dashes and is read as a label row, which would paint
+    # `-  -  -` under the buttons on the one screen where knowing the keys
+    # matters most. Caught by running the pattern over every screen the project
+    # has on record before shipping it.
+    #
+    # Matching is case-SENSITIVE on purpose: `NOT SET` on the timer screen must
+    # not be mistaken for the `Set` key.
+    #
+    # State is the whole label row, or empty on a screen that has no soft keys
+    # (Standby, Automatic, Always On). The attributes split it into the three
+    # physical positions, left to right, which is the order the labels appear
+    # in the row.
+    - name: "Pump Key Labels"
+      unique_id: water_pump_key_labels
+      icon: mdi:gesture-tap-button
+      state: >-
+        {% set pat = 'Save|Next|Exit|Set|\+|-' %}
+        {% set word = 'Save|Next|Exit|Set' %}
+        {% set l1 = states('sensor.water_pump_display_line_1') %}
+        {% set l2 = states('sensor.water_pump_display_line_2') %}
+        {% set ok1 = l1 | regex_findall(pat) | count >= 3
+                     and l1 | regex_findall(word) | count >= 1 %}
+        {% set ok2 = l2 | regex_findall(pat) | count >= 3
+                     and l2 | regex_findall(word) | count >= 1 %}
+        {% set row = l1 if ok1 else (l2 if ok2 else '') %}
+        {% set keys = row | regex_findall(pat) %}
+        {{ row }}
+      # Each attribute recomputes the row from the two line sensors rather
+      # than reading this entity's own state. A template that refers to
+      # itself is a self-reference whose evaluation order Home Assistant does
+      # not guarantee, and it would quietly read the PREVIOUS state. The
+      # repeated preamble is the price of not having that bug.
+      attributes:
+        left: >-
+          {% set pat = 'Save|Next|Exit|Set|\+|-' %}
+          {% set word = 'Save|Next|Exit|Set' %}
+          {% set l1 = states('sensor.water_pump_display_line_1') %}
+          {% set l2 = states('sensor.water_pump_display_line_2') %}
+          {% set ok1 = l1 | regex_findall(pat) | count >= 3
+                       and l1 | regex_findall(word) | count >= 1 %}
+          {% set ok2 = l2 | regex_findall(pat) | count >= 3
+                       and l2 | regex_findall(word) | count >= 1 %}
+          {% set row = l1 if ok1 else (l2 if ok2 else '') %}
+          {% set keys = row | regex_findall(pat) %}
+          {{ keys[0] if keys | count >= 3 else '' }}
+        middle: >-
+          {% set pat = 'Save|Next|Exit|Set|\+|-' %}
+          {% set word = 'Save|Next|Exit|Set' %}
+          {% set l1 = states('sensor.water_pump_display_line_1') %}
+          {% set l2 = states('sensor.water_pump_display_line_2') %}
+          {% set ok1 = l1 | regex_findall(pat) | count >= 3
+                       and l1 | regex_findall(word) | count >= 1 %}
+          {% set ok2 = l2 | regex_findall(pat) | count >= 3
+                       and l2 | regex_findall(word) | count >= 1 %}
+          {% set row = l1 if ok1 else (l2 if ok2 else '') %}
+          {% set keys = row | regex_findall(pat) %}
+          {{ keys[1] if keys | count >= 3 else '' }}
+        right: >-
+          {% set pat = 'Save|Next|Exit|Set|\+|-' %}
+          {% set word = 'Save|Next|Exit|Set' %}
+          {% set l1 = states('sensor.water_pump_display_line_1') %}
+          {% set l2 = states('sensor.water_pump_display_line_2') %}
+          {% set ok1 = l1 | regex_findall(pat) | count >= 3
+                       and l1 | regex_findall(word) | count >= 1 %}
+          {% set ok2 = l2 | regex_findall(pat) | count >= 3
+                       and l2 | regex_findall(word) | count >= 1 %}
+          {% set row = l1 if ok1 else (l2 if ok2 else '') %}
+          {% set keys = row | regex_findall(pat) %}
+          {{ keys[2] if keys | count >= 3 else '' }}
+
+- binary_sensor:
+    # THE DRY-RUN FAULT, and the one entity here worth an alert.
+    #
+    # The manual: with no flow and no pressure the pump runs 60 s, retries
+    # three times, then stops and shows this. It does NOT restart by itself
+    # when water comes back - someone has to intervene. So this going on means
+    # the pump is down until a human (or an automation) acts, not that it is
+    # waiting it out.
+    - name: "Pump Check Water"
+      unique_id: water_pump_check_water
+      device_class: problem
+      icon: mdi:water-alert
+      state: >-
+        {{ 'Check Water' in states('sensor.water_pump_display_line_2') }}
+      availability: >-
+        {{ states('sensor.water_pump_display_line_2') not in
+           ['unknown', 'unavailable'] }}
+
+    - name: "Pump Valve Closed"
+      unique_id: water_pump_valve_closed
+      icon: mdi:valve-closed
+      state: >-
+        {{ 'VALVE CLOSED' in states('sensor.water_pump_display_line_2') }}
+      availability: >-
+        {{ states('sensor.water_pump_display_line_2') not in
+           ['unknown', 'unavailable'] }}
+
+    # The timer has no schedule programmed. Time Mode with NOT SET showing is a
+    # pump that will not run on its own.
+    - name: "Pump Timer Not Set"
+      unique_id: water_pump_timer_not_set
+      icon: mdi:timer-off-outline
+      state: >-
+        {{ 'NOT SET' in states('sensor.water_pump_display_line_2') }}
+      availability: >-
+        {{ states('sensor.water_pump_display_line_2') not in
+           ['unknown', 'unavailable'] }}
+
+    # ALWAYS ON HAS NO DRY-RUN PROTECTION. The manual says it may only be
+    # operated under continuous observation, and line 2 blinks `Not
+    # Recommended` at 1 Hz while it is active - the panel itself is warning.
+    #
+    # This is a plain reflection of the mode, with no interlock behind it: full
+    # button access was the chosen design. If you want a safety net, build it
+    # as an automation on this entity (for example, press MODE after N minutes
+    # in Always On) rather than by removing the button.
+    - name: "Pump Unprotected Run"
+      unique_id: water_pump_unprotected_run
+      device_class: safety
+      icon: mdi:alert-outline
+      state: "{{ states('sensor.water_pump_mode') == 'Always On' }}"

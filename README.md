@@ -69,7 +69,7 @@ Pins numbered 0-9 left to right, viewed from above with the display facing you.
 | Pin | DC (V) | Identification | Tap? |
 | --- | --- | --- | --- |
 | 0 | **-1.53** | V0 / VEE contrast bias | **NEVER — negative rail will destroy a GPIO** |
-| 1 | +4.87 | VDD (+5 V) | No |
+| 1 | ~~+4.87~~ **3.17** | **CLOCK** — ~~VDD (+5 V)~~ **wrong, see below** | **Yes — wired 2026-11-11** |
 | 2 | 3.23 | Logic signal | Yes |
 | 3 | 3.33 | Logic signal | Yes |
 | 4 | 0 | VSS / GND | Yes — ground reference |
@@ -536,16 +536,22 @@ speaks.
 
 ### Unresolved — must be settled before wiring
 
-1. **Which pin is which.** ~~On the LCD header, RS, E and the D4-D7 order are
-   not determined.~~ Resolved as far as decoding goes — clock is D1, data is
-   D2, and the display renders. What is still missing is the *physical* map
-   from XIAO D0-D9 to LCD header positions 1-10, which is a meter job, not a
-   firmware one. Needed to reproduce the wiring, not to read the bus.
+1. ~~**Which pin is which.**~~ **Resolved 2026-11-10.** The physical map is
+   [recorded](#the-physical-pin-map--recorded-2026-11-10), and **LCD header pin
+   2 is the DATA line, proven by decoding actual display text** — see
+   [Reading the display from the data wire alone](#reading-the-display-from-the-data-wire-alone--2026-11-10).
+   The clock is **LCD pin 1**, confirmed 2026-11-11 and now wired to D0 — but
+   it is not needed to read the display: the bit period is recoverable from the
+   data line's own run lengths. (Earlier text here guessed pin 8 or 9. Wrong.)
 
 2. **Actual logic level.** The ~3.1-3.4 V DC readings on the signal lines are
    *time averages of a switching bus*, not logic levels. A 5 V line high 65 %
-   of the time reads 3.25 V. VDD is 4.87 V and the panel controller is 5 V, so
-   5 V CMOS signalling is likely. Corroborating tell: E is a narrow strobe and
+   of the time reads 3.25 V. ⚠ **The "VDD is 4.87 V, so 5 V signalling is
+   likely" inference is now unsupported** — it rested on LCD pin 1 being VDD,
+   and pin 1 turned out to be the CLOCK at 3.17 V (2026-11-11). No wired pin is
+   now known to be a 5 V rail. The clock capture is consistent with a **3.3 V**
+   bus: pin 1 swings 0 → ~3.3 V and its measured DC average matches a 3.3 V
+   line to within 0.01 V. Re-meter before spending anything on level shifting. Corroborating tell: E is a narrow strobe and
    should average near 0 V, yet no signal pin does — consistent with either
    continuous refresh or 5 V levels.
 
@@ -627,7 +633,9 @@ use; it is kept for reference and for other panels.
   ~6.6 kedges/s and still deserves a short stub.
 - Those series resistors are **not** GPIO overvoltage protection. See
   unresolved item 2 — use a 74LVC245 for that, not a divider.
-- Never connect LCD pin 0 (the contrast bias rail) or pin 1 (+5 V) to a GPIO.
+- Never connect LCD pin 0 (the contrast bias rail, -1.53 V) to a GPIO.
+  (Pin 1 was on this list until 2026-11-11; it is the CLOCK at 3.17 V, not
+  +5 V, and is now deliberately wired to D0.)
 - Bond the pump's 0 V to the XIAO's `GND` pin. A ground wire, not a seventh
   GPIO.
 - Button injection: **no parts needed for MODE.** The switch was metered and
@@ -645,7 +653,393 @@ use; it is kept for reference and for other panels.
   so it never opens cleanly; use a photoMOS SSR (TLP222A, AQY212GH) or a reed
   relay, which are genuinely bidirectional.
 
+### The physical pin map — recorded 2026-11-10
+
+**This is the record that was missing, and it is the most expensive datum in
+the project: six wires, 24 hours of soldering, because the LCD header pins are
+extremely close together.** Treat it as canonical. It is duplicated in
+[esphome/pinmap.yaml](esphome/pinmap.yaml) and in project memory. Change it
+here first if the wiring ever changes.
+
+Numbering convention: **LCD facing you, reading left to right, header positions
+are 0 to 9.**
+
+| XIAO | GPIO | LCD pin | 2026-09 meter (floating ref — **unreliable**) | Role |
+| --- | --- | --- | --- | --- |
+| D2 | 2 | **2** | 3.23 V logic | **DATA — proven by decoded text** |
+| D1 | 1 | **3** | 3.33 V logic | **GND — 0 Ω to board ground, metered 2026-11-11** |
+| D4 | 22 | **4** | 0 V | static HIGH — *not* ground |
+| D9 | 20 | **5** | 3.34 V logic | static LOW — possible 2nd ground, unmetered |
+| D10 | 18 | **6** | 0 V | static HIGH |
+| D5 | 23 | **7** | 3.08 V logic | static HIGH |
+| D8 | 19 | — | — | MODE inject, other side to XIAO GND |
+
+### How few wires does the tap actually need?
+
+Six wires are on the LCD header today. **Two of them do the work. Four are
+history.** Given what soldering this header costs, that is worth writing down
+before the next time a wire has to be redone.
+
+| LCD pin | XIAO | Role | Needed? |
+| --- | --- | --- | --- |
+| **1** | D0 | **CLOCK** | **yes** — see the measurement below |
+| **2** | D2 | **DATA** | **mandatory**, this is the display |
+| 3 | D1 | GND | **no** — redundant, see below |
+| 4 | D4 | static HIGH | no — diagnostic only |
+| 5 | D9 | static LOW | no — diagnostic only |
+| 7 | D5 | static HIGH | no — diagnostic only |
+
+**Pins 4, 5 and 7 answer a question that is closed.** They were added to find
+the clock by watching which line moved when a button was pressed. The clock was
+found — it is pin 1 — and these three have never shown anything but a static
+level. They cost three solder joints on the hardest header in the project and
+return nothing.
+
+**Pin 3 is a ground, and the ESP32 is already grounded to the same net.** It
+was metered at 0 Ω to pump board ground on 2026-11-11, and the XIAO's own GND
+is bonded to pump board ground (confirmed 2026-11-10 — it is what makes button
+injection work at all). So this wire is a second connection to a net the board
+is already on. It is also the only reason GPIO1 carries a permanent *"must
+never be configured as an output, driving it high is a dead short"* warning —
+drop the wire and that hazard goes with it.
+
+> ⚠ **Meter before cutting.** The claim that lets pin 3 go is *the button
+> common and the LCD ground are the same net*. That is near-certain on a
+> single-board appliance and it is consistent with everything measured, but it
+> has not been metered end to end. It is one continuity check: probe LCD pin 3
+> against the button connector's common terminal and expect 0 Ω. This project's
+> own history is the argument for doing it — the 2026-09 voltage table got four
+> of six pins wrong because it was taken against a floating reference, and a
+> meter has twice beaten the written record since.
+
+**So the minimum is two wires: LCD pin 1 (CLOCK) and pin 2 (DATA)**, with the
+ground arriving on the button connector, which has to be there anyway.
+
+**One wire is also possible, and is not recommended.** The display can be read
+from pin 2 alone by recovering the bit period from the data line's own run
+lengths — that is how the panel was first decoded, before the clock was
+identified, and it is written up under
+[Reading the display from the data wire alone](#reading-the-display-from-the-data-wire-alone--2026-11-10).
+It works, but it is a real step down:
+
+| | Clean rate |
+| --- | --- |
+| DATA only, clock recovered in software | 1380/1395 frames = **98.9 %** |
+| DATA + CLOCK, sampled on the edge | **~0.04 % of cells garbled**, 0 dropped, 0 undecoded |
+
+That is better than an order of magnitude, measured on this hardware, and the
+clock wire is already soldered. Keep it. Single-wire is the fallback for a
+rebuild where pin 1 cannot be reached, not the target.
+
+## The CLOCK is LCD pin 1 — confirmed 2026-11-11
+
+Earlier text here said the clock "must be LCD pin 8 or 9". **That was wrong.**
+It rested on a duty-cycle × voltage coincidence (96.0 % × 3.34 V = 3.21 V vs
+3.20 V measured) and was never tested. The user's handwritten notes of
+19.09.2026 had marked LCD pin 1 as CLOCK all along.
+
+A seventh wire now runs **LCD pin 1 → XIAO D0 (GPIO0)**. Captured with
+`esphome/clockcheck.yaml`; fixture `captures/2026-11-11-lcd-pin1-clock.txt`.
+12 frames, 11 identical at 720 edges / 9696 µs span.
+
+| Evidence | Measured | Compared against |
+| --- | --- | --- |
+| High pulses per frame | **383** | protocol's **382 bits** per frame |
+| Modal pulse period | **26 µs** | recovered bit period **T = 25.50 µs** |
+| Frame span | **9696 µs** | data frame span **9708 µs** |
+| Predicted DC average | **3.16 V** | **3.17 V** metered |
+
+LOW runs 11–12 µs, HIGH runs 14–15 µs, 57.7 % duty inside a frame, idling
+**high** between frames. The clock is **gated with the data**, which is why
+`edge_dump` could frame it at all. The DC average is the nicest check: a frame
+is 9.7 ms of a ~100 ms period, so 0.9 × 3.3 + 0.1 × 0.577 × 3.3 = 3.16 V, and
+the meter read 3.17 V.
+
+### The safety item that was raised, and why it was cleared
+
+This README previously forbade wiring pin 1 to any GPIO because it recorded
+pin 1 as **+4.87 V VDD**, and ESP32-C6 pins are not 5 V tolerant. That entry
+came from the 2026-09 floating-reference voltage table — **the same table that
+called pin 3 "3.33 V logic" when pin 3 is ground, and pin 4 "0 V / VSS" when
+pin 4 is static high.** It was already known wrong twice. A meter reading of
+**3.17 V** on 2026-11-11 settled it: a 3.3 V-domain line, not a 5 V rail.
+
+> **Standing rule: the meter outranks any inherited table.** The user's
+> ohmmeter has now overturned this repo's records twice — pin 3 as ground, and
+> pin 1 as the clock. Do not resurrect the 2026-09 table for anything.
+
+### It *does* fix the ~1 % bit slips — measured 2026-11-11
+
+**Answered, and the answer is yes.** Sampling DATA on the real CLOCK beats
+recovering the timing from the data line's own run lengths, by more than an
+order of magnitude:
+
+| Method | Clean rate |
+| --- | --- |
+| Clock recovery from DATA alone (`tools/walk.py`, 2 walks) | 1380 / 1395 frames = **98.9 %** |
+| Sampling on CLOCK (`clocked_tap` on GPIO0, first live run) | **2 garbled cells in 343 363 edges**, 0 dropped, 0 undecoded, 10.0 frames/s |
+
+At 32 character cells per frame and ~950 frames that is roughly **0.007 % of
+cells**, against the recovered clock's ~1 % of *frames*. The single-wire method
+remains a genuine fallback and is what proved the protocol in the first place,
+but the clock wire earns its place.
+
+It also cleared an older worry: run 4 of this firmware in September had
+regressed to *161 undecoded, 3156 garbled* and that was blamed on a failing D2
+solder joint. The first run after the re-solder reads 0 and 2.
+
+The caution below was written before that measurement and is kept because the
+reasoning was right even though the conclusion was pessimistic — the defect it
+describes is real, it just belongs to `edge_dump` rather than to the clock.
+
+#### The caution that preceded the measurement
+
+Confirming the clock exists is not the same as showing it decodes better, and
+the `edge_dump` capture argued for caution:
+
+- **47 of 383 HIGH runs are followed by another HIGH run** — an edge was
+  timestamped but read back high.
+- Only **8237 edges** arrived across 12 frames where 382 pulses/frame predicts
+  **9168**. About 10 % are missing.
+- The defect is **deterministic, not jitter**: frames 0, 1 and 4 give
+  *identically* 719 runs / 336 LOW / 383 HIGH / 47 anomalies.
+
+That reproducibility is the tell. ISR latency would vary between frames; this
+does not. So the likelier reading is that the clock genuinely narrows or pauses
+at ~47 fixed points per frame — plausibly word or line boundaries.
+
+Either way, a clock line that loses ~10 % of its own edges to a GPIO ISR cannot
+be *assumed* to beat the data line's recovered timing, which already decodes
+**98.9 %** of frames. It has to be measured.
+
+**And then it was measured, and the caution turned out to be misplaced — but
+not wrong about the defect.** `clocked_tap` sees 0 dropped samples at the same
+~3.8 kedges/s where `edge_dump` lost 10 %. The difference is in the ISR:
+`edge_dump` timestamps the edge and *then* calls `digital_read()` separately,
+so a pulse that ends in between reads back at the wrong level. `clocked_tap`
+latches the whole GPIO port in one register read. The 47 anomalies per frame
+were an artefact of the measuring instrument, not a property of the clock —
+which is exactly why "it has to be measured" was the right call.
+
+LCD pins **0, 8 and 9 remain unwired**. Keep pin 0 off permanently: it is the
+negative contrast bias at −1.53 V and will destroy a GPIO.
+
+**What the previous decode does and does not tell you.** The old tap found
+clock on XIAO D1 and data on XIAO D2 — but that was *different wiring*, and
+those XIAO pin numbers carry no information about LCD positions. The current
+map putting D1 and D2 on LCD 3 and LCD 2 is a coincidence of pin numbering, not
+a confirmation. Clock and data were re-identified from scratch, below.
+
+**GND is LCD pin 3 — settled 2026-11-11 by continuity, not by inference.**
+
+The user put an ohmmeter between board ground (the 0 V side of the MODE button)
+and LCD pin 3 and read **0 Ω**. That is a direct measurement against a known
+reference and it outranks every other piece of evidence here.
+
+It agrees with the capture, which had already said the same thing without being
+read correctly:
+
+| LCD pin | XIAO | 2026-11-10 capture | Consistent with GND? |
+| --- | --- | --- | --- |
+| **3** | D1 | **static LOW**, 0 edges, 0 % high | **yes** |
+| 4 | D4 | **static HIGH**, 100 % high | **no** |
+| 5 | D9 | static LOW | possible — unmetered |
+| 6 | D10 | static HIGH | no |
+| 7 | D5 | static HIGH | no |
+
+> **Corrected.** This section previously claimed **GND is LCD pin 4**, citing
+> the 2026-09 meter reading of 0 V. That was wrong twice over. The reading came
+> from the floating-reference table that
+> [esphome/pinmap.yaml](esphome/pinmap.yaml)'s own run log declares *unusable
+> for identifying ground* — so the README was contradicting the evidence file
+> it was summarising — and the 2026-11-10 capture reads LCD pin 4 as static
+> **HIGH**, which is the opposite of ground.
+
+**Still open:** LCD pin 5 also reads static LOW, so it may be a second ground or
+a control line strapped low. One more ohm check settles it. Pin 4 is excluded
+either way.
+
+> ⚠ **GPIO1 must never be configured as an output.** LCD pin 3 is wired to XIAO
+> D1 (GPIO1), and pin 3 is now known to be bonded to XIAO GND through the pump
+> board. Driving that pin high is a direct short from the regulator to ground.
+> It is an input everywhere in this repo today; keep it that way.
+
+### Reading the display from the data wire alone — 2026-11-10
+
+LCD pin 2 was first identified as DATA *statistically*: 93.0 % duty, 1399
+edge/s, 90.4 ms inter-frame gap, 10.0 frames/s, all matching the 2026-09
+decode. That is suggestive, not conclusive, and nothing had ever been read off
+this wiring because the clock is not among the six wired pins.
+
+It turns out the clock is not needed.
+
+**The idea.** On a synchronous serial bus the data line holds each bit for
+exactly one clock period, so every interval between its transitions is an
+integer multiple of that period. Recover the period and the bit stream follows:
+
+```
+measure run lengths -> fit the fundamental period T
+  -> each run of duration d becomes round(d/T) identical bits
+  -> reassemble the bit string
+  -> hunt the known 7C 40 marker at every bit offset, 9-bit words
+```
+
+[esphome/recover.yaml](esphome/recover.yaml) captures raw edge run lengths from
+GPIO2 and prints them; [tools/recover.py](tools/recover.py) does the fit and
+the search. Deliberately split that way — the recovery algorithm is the part
+that needs iterating, and iterating on-device costs a reflash per attempt.
+
+**The result.** All eight captured frames decode identically:
+
+```
+   Time Mode
+    NOT SET
+```
+
+**Recovered parameters:**
+
+| | |
+| --- | --- |
+| bit period T | **25.50 µs** (mean quantisation error 0.082 over 1112 runs) |
+| word length | **9 bits, MSB first** |
+| word layout | leading bit = command/data flag, trailing 8 = payload |
+| line marker | `7C 40` (flags 1, 0), then 16 character words (all flag 0) |
+| frame | 140 edges, 9708 µs, 381 of 382 bits recovered |
+| line spacing | the two markers sit **exactly 191 bits apart** |
+
+**Why this is a result and not a coincidence.** Searching a parameter space for
+English text is precisely how to fool yourself, so the claim rests on four
+independent checks, not on the text alone:
+
+1. **Two unrelated routes to T agree.** Fitted from the run-length histogram:
+   25.50 µs. Implied by the documented 382-bit frame over the measured 9708 µs
+   span: 25.41 µs. 0.4 % apart, and the frame length was fixed in 2026-09,
+   long before this capture.
+2. **Eight frames, one answer.** Every frame independently produces the same
+   two strings.
+3. **The second line falls out at the predicted offset.** The 2026-09 note says
+   line 2 starts two bits out of phase; the two markers are 191 bits apart,
+   which is exactly the documented half-frame.
+4. **The flag bits are consistent.** Both marker words carry flag 1/0 and all
+   thirty-two character words carry flag 0. A bad alignment scatters that bit.
+
+And the content is semantically coherent: the pump is in **Time Mode** with no
+schedule programmed (**NOT SET**), which is one of the documented line-2
+messages.
+
+**Consequences.**
+
+- **LCD pin 2 = DATA is proven**, by text rather than statistics.
+- **The seventh wire is now fitted, but to LCD pin 1, not pin 8** (2026-11-11),
+  and remains optional for reading the display. Given that six wires cost
+  24 hours of soldering, this is the most useful thing the run established.
+- The 219 short gaps flagged as a risk in `recover.yaml` were harmless: the
+  fundamental is ~25.5 µs and the 15 µs runs quantise to 1T without disturbing
+  the fit.
+
+### Confirmed against a moving display — the MODE walk, 2026-11-11
+
+Decoding one static screen eight times is reproducibility, not generality: a
+decoder that only ever emits the single string it was tuned on would pass that
+test. [esphome/modewalk.yaml](esphome/modewalk.yaml) presses MODE four times
+and decodes what comes back, against predictions written down *before* the run
+from the 2026-09 button mapping.
+
+```
+predicted: Standby Mode -> Automatic Mode -> Time Mode -> Always On -> Standby Mode
+observed : Standby Mode -> Automatic Mode -> Time Mode -> Always On -> Standby Mode
+```
+
+695 frames. Every documented screen came back, including three that had never
+been captured on this wiring:
+
+```
+[  Standby Mode  ][                ]
+[ Automatic Mode ][                ]
+[   Time Mode    ][                ]
+[Time Now   00:00][Save  Set   Exit]   <- menu, opens by itself
+[   Time Mode    ][    NOT SET     ]   <- menu times out by itself
+[   Always On    ][Not Recommended ]
+```
+
+The Time Mode leg reproduced the documented three-screens-from-one-press
+sequence exactly. `Not Recommended` was a known string that had never actually
+been observed. The bit period fitted to **25.50 µs** — the same value recovered
+from a completely different capture of a different screen, confirming it is a
+property of the panel's clock rather than of the content.
+
+**The defect, stated plainly: 690/695 frames decoded cleanly (99.28 %). Five
+did not.**
+
+These are not the panel caught mid-redraw, which is what they look like and
+what it would be convenient to call them. Each corrupt frame sits between two
+*clean* frames of the *same* screen with identical edge count and span. The
+panel sent the same bits; the recovery garbled them. The signature is a single
+bit slip — correct text up to a point, then noise to the end of the line:
+
+```
+[  Standa<?&722??]   correct through "  Stand"
+[   Ti??@????@@@@]   correct through "   Ti"
+```
+
+Two design properties keep it from mattering. Each line is located by its own
+marker scan, so a slip in line 1 leaves line 2 intact — frame 480 has a corrupt
+line 1 and a perfect `NOT SET` below it. And the panel repeats the screen about
+ten times a second, so the next frame is clean.
+
+**The walk was repeated to find out whether those slips are random or
+content-dependent**, because that decides whether voting across frames is a
+legitimate fix or useless. Run 2 passed identically, fitted the same 25.50 µs,
+and decoded 690 of 700 frames cleanly (98.57 %; 9 slips plus 1 frame with no
+marker at all). Combined: **1380 of 1395 frames clean, ~98.9 %**.
+
+The slips are **random**, on two tests:
+
+1. **Per-screen error rates sit near the global ~1 %, not near 100 %.**
+   Content-dependent corruption would pin one screen at ~100 %.
+
+   | Screen | Run 1 | Run 2 |
+   | --- | --- | --- |
+   | `Standby Mode` | 3/408 = 0.74 % | 4/411 = 0.97 % |
+   | `Time Now   00:00` | 0/196 = 0 % | 1/199 = 0.50 % |
+   | `Automatic Mode` | 0/30 = 0 % | 2/30 = 6.67 % |
+   | `Time Mode` | 1/32 = 3.1 % | 1/28 = 3.6 % |
+
+   The small screens swing because they have few frames — 2/30 is one slip
+   away from 0/30 — not because they are special.
+
+2. **Repeated failures of one screen produce different garbage every time.**
+   `Standby Mode` failed 3× in run 1 giving 3 distinct wrong renderings, and 4×
+   in run 2 giving 4 distinct ones. Deterministic corruption cannot do that.
+
+> **For production: majority-vote the decoded text over three consecutive
+> frames, preferring candidates containing no `?`.** Measured on both captures:
+> **0 bad frames out of 1391 windows.** Do not ship a single-frame read.
+>
+> The "prefer clean" rule is not decoration. Plain majority voting leaves a
+> residual exactly at screen *transitions*, where all three frames differ and
+> there is no majority to find. A `?` is a self-identifying decode failure, so
+> preferring a clean candidate costs nothing and takes the residual from 2/693
+> to 0/693.
+
+> **A wrong test, recorded so it is not repeated.** The first version of this
+> analysis asked "did the same screen slip in both runs?" and confidently
+> answered *systematic*. It was wrong: `Standby` and `Time Mode` slip in both
+> runs simply because they are on display for the most frames, so at a ~1 %
+> random rate they are near-certain to. The test had no base rate in it and
+> would have called pure noise systematic.
+
+One more thing that is load-bearing: the longest run in this capture is
+44 563 µs — **1748 bit periods**, far past the ~14 where quantisation error
+slips a bit. It is an idle gap rather than data, and it is harmless *only*
+because each line is found by an independent marker scan instead of by counting
+bits from the frame start. Do not optimise that scan into a fixed offset.
+
 ### Tap pin assignment
+
+> **Superseded by the map above as of 2026-11-10.** The assignment below
+> describes the old ten-wire tap and is kept for reading the historical run
+> logs. D3, D6, D7 and D10's "6-pin header" roles no longer apply.
 
 **In use** — [live.yaml](esphome/live.yaml), the two lines that carry the
 display:
@@ -701,15 +1095,20 @@ so the worst case if a wire is on the wrong pad is a pin held low rather than
 two push-pull drivers fighting each other. It also means sinking the grounded
 terminal costs nothing — it is already at 0 V.
 
-**Both pins are driven together**, because which of the two is the 3.3 V side
-was never recorded, and the sweep could not tell: it read D7 and D8 as noise,
-87 % and 96 % solitary edges, which is exactly what an open switch looks like
-from a high-impedance input. Pulling the grounded one to ground is a no-op, so
-driving the pair is correct without knowing which is which. Meter it and the
-other line can be dropped from the script.
+> **Corrected 2026-11-10.** This section used to justify driving *both* D7 and
+> D8 by citing "87 % and 96 % solitary edges" for those pins. Those figures are
+> real but they come from the [ten-pin LCD header sweep](#the-10-pin-lcd-header-swept),
+> where D7 and D8 carried *LCD* wires. Same pin numbers, different wires — the
+> evidence did not support the claim it was attached to.
+>
+> It is now moot. The user confirmed the topology directly: **MODE is a single
+> wire on XIAO D8 (GPIO19), with the other side of the switch on XIAO GND.**
+> Shorting them simulates a press. D7/GPIO17 is no longer used for anything.
 
-Press current returns through the existing 0 V bond rather than directly
-between the two pads. It is pull-up current — sub-milliamp.
+**One pin is driven**, open-drain and `inverted: true`, so it can only sink —
+see the safety argument above. Press current returns through the existing 0 V
+bond rather than directly between two pads. It is pull-up current —
+sub-milliamp.
 
 Pulse length is 120 ms, per the 100–120 ms in [Wiring](#wiring). The script is
 `mode: single`, so a double-click in the HA UI drops the second run instead of
@@ -1351,38 +1750,115 @@ After the first USB flash, updates go over the air.
 the encrypted native API, so nothing extra is needed to get the pump into Home
 Assistant. Flash it, and once the node is on WiFi, HA discovers it by itself:
 
-1. **Settings → Devices & Services**. `Hauswasserwerk` appears under *Discovered*
+1. **Settings → Devices & Services**. `Water Pump` appears under *Discovered*
    as an ESPHome device.
 2. It asks for the encryption key. That is `api_encryption_key` in
    `esphome/secrets.yaml` — which is gitignored, and should stay that way.
 
-Two entities carry the display, mirroring the two physical rows:
+Five entities carry the panel — the two rows of glass, and the three buttons
+under it:
 
-| Entity | Example |
+| Entity | Example / effect |
 | --- | --- |
-| `sensor.hauswasserwerk_display_line_1` | `Standby Mode` |
-| `sensor.hauswasserwerk_display_line_2` | `Not Recommended`, or empty |
-| `button.hauswasserwerk_press_mode` | Advances the mode, one position per press |
+| `sensor.water_pump_display_line_1` | `Standby Mode` |
+| `sensor.water_pump_display_line_2` | `Not Recommended`, or empty |
+| `button.water_pump_press_mode` | MODE — advances the mode, one position per press |
+| `button.water_pump_press_set` | SET |
+| `button.water_pump_press_save` | SAVE |
 
-**`Press MODE` is a real actuator**, not a diagnostic. It advances the pump one
+> **The device was renamed from `Hauswasserwerk` to `Water Pump` on
+> 2026-11-11**, at the user's request, so everything a person reads in Home
+> Assistant is English. It is one line — `friendly_name` in `live.yaml` — but
+> **it changes every entity ID**. After flashing, delete the old device under
+> *Settings → Devices & Services → ESPHome* and re-adopt; otherwise the old
+> `sensor.hauswasserwerk_*` entities linger as *unavailable*. The node hostname
+> changed with it, `hauswasserwerk-live` → `water-pump`.
+
+Together those close the loop: **the pump can be driven entirely from Home
+Assistant and the result read back off its own display**, with nobody at the
+machine.
+
+**These are real actuators**, not diagnostics. MODE advances the pump one
 position round `Standby → Automatic → Time → Always On → Standby`, and
-`Always On` has no dry-run protection. Watch `Display Line 1` to see where it
-landed — one press is not always one visible screen change, and the mode only
-moves one step whatever the panel does afterwards. See
-[MODE injection](#mode-injection-no-parts-required) and
-[Button mapping](#button-mapping).
+`Always On` has no dry-run protection — the manual says it may only be run
+under continuous observation, and HA can reach it in two presses from Standby.
+Full button access was a deliberate choice; there are no interlocks in the
+firmware. Watch `Display Line 1` to see where a press landed: one press is not
+always one visible screen change, and the mode only moves one step whatever the
+panel does afterwards. See [MODE injection](#mode-injection-no-parts-required)
+and [Button mapping](#button-mapping).
 
-Both are plain trimmed text, on purpose — see
+⚠ **All three are soft keys.** The panel paints a label over each button, and
+the mapping is *positional* — the buttons are SAVE (left), SET (middle), MODE
+(right), measured 2026-11-11 by pressing them and reading the result:
+
+| Screen | left / SAVE | middle / SET | right / MODE |
+| --- | --- | --- | --- |
+| `Time Now   00:00` resting | `Save` | `Set` | `Exit` |
+| editing digits | `Next` | `+` | `-` |
+
+**In edit mode MODE is `-`, not `Exit`** — pressing it to get out decrements the
+clock. The edit menu times out by itself in ~20 s back to `Time Mode / NOT SET`
+with nothing changed; that is the way out. The field being edited **blinks** at
+1 Hz (`Time Now   00:00` ↔ `Time Now     :00` is hours selected), so the blink
+is a cursor here, not only the Always On warning.
+
+The entities are named for the *physical* key. Any automation that presses them
+must **read the label row first**, never follow a fixed sequence.
+
+⚠ **Which row carries the labels is not fixed, and is unresolved.** On the
+resting screen the decoder reports the value on line 1 and the labels on line 2;
+on the edit screen it reports them the other way round. Either the panel really
+swaps rows, or order-based line slotting mis-assigns on that screen. Settling it
+needs someone looking at the glass.
+
+The Home Assistant side does not wait for that answer, and does not guess at
+one. `sensor.water_pump_key_labels` reads **both** lines and takes whichever
+one actually contains soft labels, which is right under either explanation and
+survives the question being resolved the other way later. Its `left`, `middle`
+and `right` attributes are the three labels in physical order, and the Lovelace
+card paints them in a strip directly over the three buttons.
+
+The test is "three or more known labels **and** at least one of them a word".
+The second half is not belt-and-braces: without it `Time On  --:--` scores four
+matches on its dashes and gets painted as `-  -  -` under the buttons, on the
+screen where knowing the keys matters most. It was caught by running the
+pattern over every screen the project has on record before shipping it, which
+is cheaper than catching it on the pump.
+
+The lines are plain trimmed text, on purpose — see
 [What is published is not what is logged](#what-is-published-is-not-what-is-logged)
-for why there is no derived "mode" entity and why a blank arrives 1.5 s late.
+for why the firmware publishes no derived "mode" entity and why a blank arrives
+1.5 s late. The derived state lives in Home Assistant instead, as template
+entities in [homeassistant/water_pump.yaml](homeassistant/water_pump.yaml):
+`Pump Mode`, `Pump Key Labels`, `Check Water` (the dry-run stop — the pump does
+**not** clear it by itself), `Valve Closed`, `Timer Not Set` and
+`Unprotected Run`.
 
-Six more entities — `binary_sensor.hauswasserwerk_pin_d3` through `pin_d10`,
-all marked *diagnostic* — expose the raw state of the
+A Lovelace card that rebuilds the panel is in
+[homeassistant/lovelace-card.yaml](homeassistant/lovelace-card.yaml): a
+simulated 16×2 backlit LCD, the live soft-key strip beneath it, and the three
+buttons in physical order under that. The firmware trims the panel's centring
+spaces before publishing, so the card re-adds them with `center(16)` and pins
+`white-space:pre` — without that the browser collapses the padding and the
+panel's own centring is lost.
+
+Four more entities — `binary_sensor.water_pump_pin_d3`, `d4`, `d5` and
+`d9`, all marked *diagnostic* — expose the raw state of the remaining unclaimed
+pins on the
 [6-pin header](#why-re-sweep-a-header-that-already-came-back-empty). They exist
 to answer what `bus_sweep` structurally cannot: the sweep's buffer fills in a
 fraction of a second, so a human reaching for a front-panel button never lands
 inside its window. **Press every control on the pump in turn and watch which row
 flips.**
+
+All four would disappear in the minimal tap described under
+[How few wires does the tap actually need?](#how-few-wires-does-the-tap-actually-need)
+— they watch LCD pins 4, 5 and 7, which carry nothing the project still needs.
+
+`pin_d6` and `pin_d10` were in this list and are gone as of 2026-11-11: those
+pins now drive the SAVE and SET buttons, and a pin cannot be an open-drain
+output and a GPIO binary sensor at the same time.
 
 Each is filtered with `delayed_on_off: 100ms`, which is doing real work rather
 than just debouncing:
@@ -1405,12 +1881,14 @@ sensitive enough that a held-open web UI alone dropped it from 90 frames/s to
 16. Polling loses nothing here, because the filter has already discarded
 everything faster than 100 ms.
 
-The node's hostname stays `hauswasserwerk-live` while the HA-visible name is
-`Hauswasserwerk`, so this can share a network with anything flashed from the
-superseded `hauswasserwerk.yaml` without two nodes fighting over one mDNS name.
+The node's hostname is `water-pump` and the HA-visible name is `Water Pump`.
+The hostname was `hauswasserwerk-live`; the `-live` suffix existed only so this
+could share a network with the superseded `hauswasserwerk.yaml` node without
+two nodes fighting over one mDNS name, and `water-pump` does not collide with
+that either, so the suffix is gone.
 
 **Do not leave the web UI open while capturing.** Holding
-`http://hauswasserwerk-live.local/` open dropped the frame rate from ~90/s to
+`http://water-pump.local/` open dropped the frame rate from ~90/s to
 16/s and started losing edges in the ISR — one 160 MHz core cannot serve a
 3.8 kedge/s interrupt and stream HTTP at the same time. The native API is a
 binary push and does not do this, so Home Assistant is a fine consumer; the web
@@ -1481,13 +1959,15 @@ produce, because its clocked hypothesis silently assumed 8-bit words — see
 
 Still outstanding, none of it blocking:
 
-1. **Two wires must come off the XIAO.** The +4.87 V supply and the negative
-   contrast rail are still in the tap, clamping through the protection diodes.
-   They are among the static lines — HIGHs {D0, D4, D6}, LOWs {D3, D5, D9}.
-   This is the only item with a safety dimension.
-2. **The physical pin map is unrecorded.** Which LCD header position each XIAO
-   pin sits on was never written down. Needed to reproduce the wiring, not to
-   read the bus. A meter job.
+1. ~~**Two wires must come off the XIAO.**~~ **Resolved by the 2026-11-10
+   rewire.** LCD pins 0 (negative contrast bias) and 1 (+4.87 V VDD) are simply
+   not wired any more, so neither rail is clamping through a protection diode.
+   The remaining safety item is logic level — see item 3.
+2. ~~**The physical pin map is unrecorded.**~~ **Recorded 2026-11-10** after a
+   full rewire — see [The physical pin map](#the-physical-pin-map--recorded-2026-11-10).
+   Six LCD pins (2-7) are wired; 0, 1, 8 and 9 are not. What remains is to
+   re-identify *which* of LCD 2, 3, 5, 7 carry clock and data on this wiring,
+   which is what [pinmap.yaml](esphome/pinmap.yaml) is for.
 3. **Logic level is unsettled** — unresolved item 2, fit the 74LVC245.
 4. **Two frame word groups are unidentified**, the leading `F8 00 00` and the
    inter-line `3E 40 60 1F 10`. Skipped, not decoded. Likely cursor/addressing

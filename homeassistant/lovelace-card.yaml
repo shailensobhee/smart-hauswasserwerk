@@ -1,0 +1,136 @@
+# The pump's front panel, rebuilt in Home Assistant.
+#
+# Add via a dashboard's raw configuration editor, or "Add Card" -> Manual.
+#
+# Requires the template entities from homeassistant/water_pump.yaml - the
+# soft-key strip reads `sensor.water_pump_key_labels`. The two display lines
+# and the three buttons come straight from the ESPHome node.
+#
+# --- What this is -------------------------------------------------------------
+#
+# A 16x2 character LCD with three buttons under it, in the same left-to-right
+# order as the hardware: SAVE left, SET middle, MODE right. That was measured,
+# not assumed - each key was pressed and the effect read off the glass.
+#
+# The order is load-bearing, because the buttons are SOFT KEYS. The panel
+# paints a label over each one and the mapping is positional:
+#
+#   screen                      left/SAVE   middle/SET   right/MODE
+#   `Time Now 00:00` resting    Save        Set          Exit
+#   editing digits              Next        +            -
+#
+# So what a button does depends on the screen you are on. The strip under the
+# glass shows the three CURRENT labels, aligned over the three buttons, so you
+# never have to remember which is which - read the strip, press the button
+# under it. On screens with no soft keys (Standby, Automatic, Always On) the
+# strip is blank, which is correct: there are no labels to show.
+#
+# !! In edit mode the right-hand key is `-`, NOT `Exit`. Pressing MODE to get
+# out of a time field decrements the clock instead. The edit menu times out by
+# itself after ~20 s with nothing changed, which is the safe way out.
+#
+# --- If the glass renders as raw HTML -----------------------------------------
+#
+# The markdown card below uses inline `style` attributes to get the LCD look.
+# If a future Home Assistant version sanitises those away, replace the whole
+# first card with the plain fallback - it loses the backlight but keeps the
+# 16-column layout, which is the part that matters:
+#
+#   - type: markdown
+#     content: >-
+#       <pre>{{ states('sensor.water_pump_display_line_1') | center(16) }}
+#       {{ states('sensor.water_pump_display_line_2') | center(16) }}</pre>
+
+type: vertical-stack
+cards:
+  # --- The glass --------------------------------------------------------------
+  #
+  # The firmware trims the panel's centring spaces before publishing, because
+  # Home Assistant wants clean values to compare against. They are re-added
+  # here with `center(16)` so the two lines sit under each other exactly as
+  # they do on the device, and `white-space:pre` keeps the browser from
+  # collapsing them again - without that the padding is silently thrown away
+  # and the centring is lost.
+  #
+  # An empty line 2 is a REAL state, not a dropout: the Standby screen has a
+  # genuinely blank second line, and the decoder distinguishes that from a line
+  # the panel simply did not redraw (which it carries forward instead). It
+  # renders as a blank row, which is what the pump shows.
+  #
+  # `unknown`/`unavailable` are blanked rather than printed, so a disconnected
+  # node reads as a dark display instead of as the word "unavailable" sitting
+  # on the glass pretending to be pump output.
+  - type: markdown
+    content: |-
+      {%- set l1 = states('sensor.water_pump_display_line_1') -%}
+      {%- set l2 = states('sensor.water_pump_display_line_2') -%}
+      {%- set dead = ['unknown', 'unavailable', 'None'] -%}
+      {%- set l1 = '' if l1 in dead else l1 -%}
+      {%- set l2 = '' if l2 in dead else l2 -%}
+      {%- set k = 'sensor.water_pump_key_labels' -%}
+      <div style="background:#15181d;padding:16px 16px 10px 16px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+      <div style="background:#1336a8;background-image:linear-gradient(180deg,#1a42c4,#0f2a85);color:#e8f0ff;font-family:'Roboto Mono','Courier New',monospace;font-weight:600;font-size:1.5em;line-height:1.45;letter-spacing:4px;white-space:pre;padding:12px 14px;border-radius:5px;box-shadow:inset 0 0 20px rgba(0,0,0,.5);text-shadow:0 0 7px rgba(200,225,255,.7)">{{ l1[:16] | center(16) }}<br>{{ l2[:16] | center(16) }}</div>
+      <div style="display:flex;margin-top:10px;color:#9fb0c6;font-family:'Roboto Mono','Courier New',monospace;font-size:.95em;font-weight:600;letter-spacing:1px;min-height:1.3em">
+      <div style="flex:1;text-align:center">{{ state_attr(k, 'left') or '' }}</div>
+      <div style="flex:1;text-align:center">{{ state_attr(k, 'middle') or '' }}</div>
+      <div style="flex:1;text-align:center">{{ state_attr(k, 'right') or '' }}</div>
+      </div>
+      </div>
+
+  # --- The buttons, in physical order -----------------------------------------
+  #
+  # Named for the PHYSICAL key, never for a function, because no fixed name is
+  # true on every screen - the right-hand key is `Exit` on one screen and `-`
+  # on the next. The live labels are in the strip directly above, and a
+  # horizontal-stack splits into three equal columns, so each button sits under
+  # its own label.
+  #
+  # Each press is 120 ms with a 400 ms settle, and the firmware's script runs
+  # in `single` mode: a double click is DROPPED, not queued, so it cannot stack
+  # two presses or leave a line held low.
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: SAVE
+        icon: mdi:content-save-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.water_pump_press_save
+      - type: button
+        name: SET
+        icon: mdi:pencil-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.water_pump_press_set
+      - type: button
+        name: MODE
+        icon: mdi:rotate-right
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.water_pump_press_mode
+
+  # --- Derived state ----------------------------------------------------------
+  #
+  # Check Water is the one that matters: it is the dry-run stop, and the pump
+  # does not clear it by itself when water comes back.
+  - type: entities
+    entities:
+      - entity: sensor.water_pump_mode
+        name: Mode
+      - entity: binary_sensor.water_pump_check_water
+        name: Dry run - needs attention
+      - entity: binary_sensor.water_pump_valve_closed
+        name: Valve closed
+      - entity: binary_sensor.water_pump_timer_not_set
+        name: Timer not programmed
+      - entity: binary_sensor.water_pump_unprotected_run
+        name: Always On - no dry-run protection

@@ -1,0 +1,158 @@
+# ============================================================================
+# IS LCD PIN 1 THE CLOCK?  -  passive probe of XIAO D0 / GPIO0
+# ============================================================================
+#
+# New wiring, 2026-11-11: the user soldered a SEVENTH wire, LCD header pin 1
+# to XIAO D0 (GPIO0). Their handwritten notes of 19.09.2026 mark LCD pin 1 as
+# CLOCK. This firmware tests that.
+#
+# --- THE SAFETY ITEM THAT WAS RAISED AND THEN CLEARED -----------------------
+#
+# This repo previously recorded LCD pin 1 as +4.87 V VDD and forbade wiring it
+# to any GPIO, because ESP32-C6 pins are not 5 V tolerant. That record came
+# from the 2026-09 floating-reference voltage table - the SAME table that
+# called LCD pin 3 "3.33 V logic" when pin 3 is in fact ground, and called
+# pin 4 "0 V" when pin 4 is static high. It was wrong twice already.
+#
+# Metered 2026-11-11: LCD pin 1 reads 3.17 V. A 3.3 V-domain line, not a 5 V
+# rail. The wiring is safe and the old record is retired. Note also that
+# 3.17 V is not a clean rail voltage - it is 96% of 3.3 V, i.e. exactly the DC
+# average a meter reports for a clock that idles high and pulses low. The
+# voltage is itself weak evidence FOR the clock hypothesis.
+#
+# Rule reaffirmed: the user's meter outranks any inherited table.
+#
+# --- WHAT WOULD CONFIRM IT --------------------------------------------------
+#
+# The decode already pins the bit period at T = 25.50 us across three
+# independent captures. A clock for that bus must therefore show:
+#
+#   run lengths     strongly BIMODAL - one short pulse plus one long idle,
+#                   the PAIR summing to ~25.5 us. This is the real test. The
+#                   data line's run lengths are integer multiples of T and
+#                   spread across many values; a clock has essentially two.
+#   edges per frame ~2x the data line's. 382 bits x 2 edges = ~764, against
+#                   the ~140 edges a data frame produces.
+#   framing         if the clock is gated with the data, the same ~90 ms
+#                   inter-frame gap and ~10 frames/s.
+#
+# --- READING A NULL RESULT, decided before the run --------------------------
+#
+# NO FRAMES AT ALL is ambiguous and must not be read as "not the clock":
+#
+#   - a STATIC pin produces no edges, so no frames; or
+#   - a FREE-RUNNING clock never goes quiet for frame_gap, so loop() never
+#     closes a frame either, and the ISR silently caps at EDGE_DUMP_CAPACITY.
+#
+# Those are opposite findings with identical logs. If this run prints nothing,
+# the follow-up is bus_sweep (pinmap.yaml), which counts edges over a fixed
+# window and so separates "silent" from "too busy to frame".
+#
+# --- HOW TO RUN -------------------------------------------------------------
+#
+#   Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+#   .\.venv\Scripts\esphome.exe run esphome\clockcheck.yaml --device COM3
+#
+# Purely passive. No output is configured, nothing is driven, the pump is
+# never actuated. Safe to run with the pump in any state.
+#
+# --- RUN LOG ----------------------------------------------------------------
+#
+# 2026-11-11, run 1. CONFIRMED: LCD PIN 1 IS THE CLOCK.
+# The user's handwritten note of 19.09.2026 was right and this repo was wrong.
+#
+#   12 frames. 11 of them identical: 720 edges, span 9695-9697 us.
+#   (Frame 3 was a short 317-edge frame, i.e. a single-line redraw.)
+#
+#   Run-length structure, frame 0:
+#     LOW  runs  336, tightly clustered 11-12 us
+#     HIGH runs  383, tightly clustered 14-15 us
+#     pulse period, mode 26 us (263 of 360), median 26.0
+#     duty within a frame 57.7% high; idle-high between frames
+#
+# FOUR INDEPENDENT CONFIRMATIONS, none of which can be arranged by accident:
+#
+#   1. PULSE COUNT. 383 high pulses per frame against the protocol's
+#      documented 382 bits per frame. One clock pulse per bit, exactly.
+#   2. PERIOD. Modal pulse period 26 us against the bit period T = 25.50 us
+#      recovered independently from the DATA line across three captures.
+#   3. FRAMING. Span 9696 us against the data frame's 9708 us, with the same
+#      ~90 ms inter-frame gap. The clock is gated with the data, not free
+#      running - which is also why this capture framed at all.
+#   4. THE METER AGREES, QUANTITATIVELY. A frame is 9.7 ms of a ~100 ms
+#      period, and the line idles high between frames, so the DC average a
+#      meter sees is 0.9 x 3.3 + 0.1 x 0.577 x 3.3 = 3.16 V. Metered: 3.17 V.
+#
+# --- THE CATCH, and it is the whole answer to "does it fix the 1%?" ---------
+#
+# The capture is NOT clean, and the defect is deterministic rather than noisy:
+#
+#   47 of the 383 HIGH runs are immediately followed by another HIGH run -
+#   a recorded edge whose level read back as high. All 47 are level 1, and
+#   frames 0, 1 and 4 produce IDENTICALLY 719 runs / 336 LOW / 383 HIGH /
+#   47 anomalies. Identical, not merely similar.
+#
+#   Across all 12 frames only 8237 edges were captured where 382 pulses per
+#   frame predicts 9168. About 10% of edges are not making it into the buffer.
+#
+# That reproducibility is the interesting part. ISR LATENCY WOULD JITTER; this
+# does not. So the most likely reading is that the clock genuinely narrows or
+# pauses at 47 fixed points per frame - plausibly word or line boundaries -
+# rather than that the ESP32-C6 is randomly dropping interrupts. Either way:
+#
+#   AN INTERRUPT-SAMPLED CLOCK IS NOT MORE RELIABLE THAN THE RECOVERED ONE.
+#   The data line's recovered T already decodes 98.9% of frames. A clock line
+#   that itself loses ~10% of its edges to a GPIO ISR cannot be assumed to do
+#   better by being "the real clock" - it has to be MEASURED to do better.
+#
+# --- WHAT WOULD ACTUALLY SETTLE IT ------------------------------------------
+#
+# Sampling DATA on every CLOCK edge, which needs both pins captured with
+# correlated timestamps. edge_dump handles ONE pin, so this is a real
+# component change, not a config change. Until that exists, the honest state
+# is: pin 1 is confirmed the clock, and whether it beats clock recovery is
+# untested.
+#
+# Note that if it is attempted, the ISR route is the wrong one - 720 edge/s
+# per frame is already at the limit this run hit. The hardware paths (SPI
+# slave, RMT, or GPIO+DMA) are what sample an 11 us pulse reliably.
+
+substitutions:
+  name: hauswasserwerk-clockcheck
+  # Kept SHORT on purpose. common.yaml builds the fallback AP SSID as
+  # "<friendly_name> Fallback" and ESPHome hard-fails above 32 characters.
+  # "Hauswasserwerk ClockCheck Fallback" is 34 and cost a build cycle here,
+  # the second time this exact trap has fired in this project.
+  friendly_name: HWW ClockCheck
+
+packages:
+  common: !include common.yaml
+
+# LCD pin 1, the clock candidate. XIAO D0 = GPIO0.
+#
+# ONE PIN ONLY, same reasoning as recover.yaml: ISR load is what corrupts
+# timing measurements, and the whole value of this capture is the microsecond
+# accuracy of its run lengths. A clock runs at roughly twice the data line's
+# edge rate, so this is already the heaviest single-pin capture in the project.
+edge_dump:
+  pin:
+    number: GPIO0
+    mode:
+      input: true
+
+  frame_gap: 1ms
+  min_edges: 40
+
+  # More than recover.yaml's 8. If pin 1 IS the clock the per-frame edge count
+  # roughly doubles, and a few extra frames cost nothing while giving room to
+  # see whether the framing is stable.
+  max_frames: 12
+
+logger:
+  level: INFO
+  logs:
+    wifi: INFO
+    wifi_esp32: INFO
+    api: INFO
+    mdns: INFO
+    sensor: INFO

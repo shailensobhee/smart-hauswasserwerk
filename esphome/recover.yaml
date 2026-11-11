@@ -1,0 +1,143 @@
+# ============================================================================
+# CLOCK RECOVERY ATTEMPT - read the display from the DATA line alone
+# ============================================================================
+#
+# pinmap.yaml established, across two reproduced captures, that LCD pin 2
+# carries framed data at 10.0 frames/s with a 90.4 ms inter-frame gap and a
+# 93.0% duty cycle - all three matching the 2026-09 decode of the old wiring.
+# But it established that STATISTICALLY. Nothing was decoded, because the
+# clock line is not among the six wired pins, so no text has ever come off
+# this wiring.
+#
+# Statistics are weaker evidence than text. This firmware is the attempt to
+# close that gap without soldering a seventh wire.
+#
+# --- THE IDEA ---------------------------------------------------------------
+#
+# On a synchronous serial bus the data line holds each bit for exactly one
+# clock period. So every interval between its transitions is an INTEGER
+# MULTIPLE of that period. Recover the period and the bit stream follows,
+# with no clock wire:
+#
+#   measure run lengths  ->  find the fundamental period T
+#   ->  each run of duration d is round(d/T) identical bits
+#   ->  reassemble the bit string
+#   ->  hunt the known 7C 40 line marker at every bit offset, 9-bit words
+#   ->  render 16 characters after each marker
+#
+# Everything after the first step is already known from the 2026-09 protocol
+# work, which is what makes this worth trying at all: there is a known-answer
+# check at the end. If "Standby Mode" or "Automatic Mode" falls out, the
+# identification is confirmed and the screen is readable. Nothing else
+# produces a twelve-character English phrase by chance.
+#
+# --- WHY IT MIGHT FAIL, stated up front -------------------------------------
+#
+# The whole method rests on the bit period being STABLE. A bit-banged driver
+# with variable inter-bit delays breaks it, and the measured gap histogram
+# already has a hint of trouble: 219 gaps landed in the 8-16 us bucket while
+# the dominant population is 16-32 us. If the fundamental is ~20 us, nothing
+# should be shorter than that.
+#
+# Three readings of those 219, and they are not equally good news:
+#   - glitches/ringing, which can be filtered out
+#   - a fundamental nearer 10 us with the 16-32 bucket being 2T, which is fine
+#   - genuinely variable timing, which kills the method
+#
+# This is a TEST, not a promise. A failed recovery is a real answer too: it
+# means the seventh wire is required, and that is worth knowing in one flash
+# rather than after a day of soldering.
+#
+# --- WHAT IS DELIBERATELY NOT HERE ------------------------------------------
+#
+# No decoding on the device. The recovery algorithm is exactly the part that
+# needs iterating, and iterating on-device costs a reflash per attempt. This
+# prints raw run lengths; the analysis happens on the PC against the dump.
+#
+# ONE PIN ONLY. pinmap.yaml proved the other five lines generate no interrupts
+# at all, so they would contribute nothing but ISR load - and ISR load is what
+# corrupts timing measurements. The whole value of this capture is in the
+# microsecond accuracy of its run lengths.
+#
+# --- HOW TO RUN -------------------------------------------------------------
+#
+#   Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+#   .\.venv\Scripts\python.exe -m esphome run esphome\recover.yaml --device COM3
+#
+# It dumps 8 frames and then stops. Reset the device to capture again.
+#
+# --- RUN LOG ----------------------------------------------------------------
+#
+# 2026-11-10, run 1. IT WORKED. The display was read off one wire.
+#
+#     Line 1:  "   Time Mode    "
+#     Line 2:  "    NOT SET     "
+#
+#   Identical in all 8 frames. Decoded with tools/recover.py + verify.py.
+#
+#   Recovered parameters:
+#     bit period T   25.50 us   (mean quantisation error 0.082 over 1112 runs)
+#     word length    9 bits, MSB first
+#     word layout    leading bit = command/data flag, trailing 8 = payload
+#     line marker    7C 40  (flags 1,0), then 16 character words (all flag 0)
+#     frame          140 edges, 9708 us, 381 bits recovered of a 382-bit frame
+#     line spacing   the two markers are EXACTLY 191 bits apart
+#
+#   The cross-check that makes this a result rather than a coincidence: T was
+#   fitted from the run-length histogram alone (25.50), and independently
+#   implied by the documented 382-bit frame over the measured span
+#   (9708/382 = 25.41). Two unrelated routes agreeing to 0.4%. On top of that,
+#   two separate English phrases fell out at the right offsets, both already in
+#   the 2026-09 string list, and semantically consistent with each other - the
+#   pump is in Time Mode with no schedule programmed.
+#
+#   The 219 short gaps feared above (see WHY IT MIGHT FAIL) were harmless: the
+#   fundamental is ~25.5 us and the 15-us runs are a small minority that
+#   quantise to 1T without disturbing the fit.
+#
+#   CONSEQUENCE: LCD pin 2 = DATA is now proven by text, not by statistics, and
+#   the seventh wire to LCD pin 8 for the clock is OPTIONAL rather than
+#   required. Given that six wires cost 24 hours of soldering, that is the
+#   single most useful thing this firmware established.
+#
+#   Still open: this was an idle capture. A MODE press should change line 1 and
+#   is the natural confirmation run - see max_frames and the 11.7 s window.
+
+substitutions:
+  name: hauswasserwerk-recover
+  friendly_name: Hauswasserwerk Recover
+
+packages:
+  common: !include common.yaml
+
+# LCD pin 2, the data line. XIAO D2 = GPIO2.
+edge_dump:
+  pin:
+    number: GPIO2
+    mode:
+      input: true
+
+  # Intra-frame gaps top out near 256 us and frames are ~90 ms apart, so 1 ms
+  # sits in two decades of empty space. Framing is not sensitive to this.
+  frame_gap: 1ms
+
+  # A full frame carries ~140 edges; a short (191-bit) frame fewer. 40 is low
+  # enough to catch a short frame and high enough that a quiet patch inside a
+  # frame is not mistaken for the end of one.
+  min_edges: 40
+
+  # Enough to cross-check a recovery against itself. If frames 1 and 2 decode
+  # to the same text, that is a far stronger result than one frame decoding to
+  # something plausible.
+  max_frames: 8
+
+# INFO keeps the dump readable. The frames are the entire point of the run and
+# anything else in the log is noise around them.
+logger:
+  level: INFO
+  logs:
+    wifi: INFO
+    wifi_esp32: INFO
+    api: INFO
+    mdns: INFO
+    sensor: INFO

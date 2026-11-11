@@ -1,0 +1,360 @@
+# ============================================================================
+# THE PIN MAP RUN - which LCD header pin is CLK, which is DATA, which is GND
+# ============================================================================
+#
+# This file exists because the previous wiring's LCD-header positions were
+# never written down. The bus was decoded (CLK on XIAO D1, DATA on XIAO D2)
+# but nobody recorded which LCD pins those two wires came from, so the work
+# could not be reproduced. Re-soldering cost 24 HOURS, because the LCD header
+# pins are extremely close together.
+#
+# THAT MUST NOT HAPPEN AGAIN. The map below is the canonical record. It is
+# duplicated in README.md and in the project memory. If you change the wiring,
+# change it HERE FIRST and then re-run.
+#
+# --- THE MAP, as wired and reported on 2026-11-10 ---------------------------
+#
+# LCD numbering convention: LCD FACING YOU, READING LEFT TO RIGHT, the ten
+# header positions are 0 1 2 3 4 5 6 7 8 9.
+#
+#     XIAO  GPIO   LCD pin    what the 2026-09 meter run said that pin is
+#     ----  ----   -------    ------------------------------------------
+#     D1      1       3       logic, 3.33 V
+#     D2      2       2       logic, 3.23 V
+#     D4     22       4       0 V  - VSS / GROUND
+#     D5     23       7       logic, 3.08 V
+#     D9     20       5       logic, 3.34 V
+#     D10    18       6       0 V  - RW, strapped low
+#
+#     D8     19     (none)    MODE button, other side to XIAO GND
+#
+# GROUND BOND: CONFIRMED by the user on 2026-11-10. XIAO GND is wired to the
+# pump BOARD ground - it is what makes the MODE injection work. So the capture
+# has a real reference for the first time in this project's history, and the
+# D4>L4 tap on LCD pin 4 (VSS) is the live check on it: if that line is not
+# pinned LOW and silent, the bond is not what it is believed to be.
+#
+# LCD pins 0, 1, 8 and 9 are DELIBERATELY NOT WIRED:
+#
+#     pin 0   -1.53 V   V0/VEE contrast bias. A negative rail forward-biases
+#                       the ESP32-C6 substrate diode. NEVER connect it.
+#     pin 1   +4.87 V   VDD. C6 GPIOs are not 5 V tolerant. NEVER connect it.
+#     pin 8   3.20 V    logic, simply not wired
+#     pin 9   3.34 V    logic, simply not wired
+#
+# Not wiring 0 and 1 closes the standing safety item that the old ten-wire tap
+# left open, where both rails sat on GPIOs clamping through protection diodes.
+#
+# --- WHAT THIS RUN HAS TO PROVE, and what it structurally cannot ------------
+#
+# CLK and DATA: provable here. The display bus free-runs at ~10 frames/s, so
+# no button press is needed. Exactly two of the four logic lines - D1>L3,
+# D2>L2, D5>L7, D9>L5 - will carry the ~6600 edge/s clock and the ~1200
+# edge/s data. The CLOCKED hypothesis family then renders text off the pair,
+# and text is proof: a twelve-character contiguous phrase is not something a
+# wrong hypothesis produces by chance.
+#
+# GND: NOT provable here, and saying so is the point. LCD pin 4 (VSS) and LCD
+# pin 6 (RW strapped low) both sit at 0 V and both read static LOW in every
+# sample. No capture can separate two static lines - the net-identity test
+# says so itself and reports such pairs as "too static to test" rather than
+# guessing. On many panels RW is tied directly to VSS, which would make them
+# literally the same net.
+#
+# So GND is LCD pin 4 on the strength of the 2026-09 meter reading (0 V DC
+# AND 0 V AC - genuinely static, not a time-average of a switching line), and
+# it wants one confirming continuity check against the bonded reference. What
+# this run DOES prove about them is negative and still worth having: if either
+# D4>L4 or D10>L6 shows edges, the 0 V identification is wrong.
+#
+# --- LABELS CARRY THE LCD POSITION, and that is the whole fix ---------------
+#
+# The old sweep labelled lines by XIAO silkscreen only, so its verdict read
+# "CLK=D1 DATA=D2" - true, reproducible, and useless for rebuilding the
+# wiring. Labels here are "D1>L3" - XIAO pin, then LCD pin. The verdict will
+# therefore name LCD positions directly, and the answer cannot be separated
+# from the report again.
+#
+# Six characters is the maximum; the report's table columns are %-6s / %7s
+# and longer labels misalign them.
+#
+# --- KNOWN ACCEPTED RISK: logic level ---------------------------------------
+#
+# README unresolved item 2 is still open. VDD is 4.87 V and the panel
+# controller is likely 5 V CMOS, so the four logic lines may be driving ~5 V
+# into C6 GPIOs that are not 5 V tolerant. The 3.08-3.34 V meter readings do
+# not settle it - they are TIME AVERAGES of a switching bus, not logic levels,
+# and were taken against a floating reference besides.
+#
+# This is accepted rather than fixed because the previous tap ran the same
+# exposure on D1/D2 for extended sessions without damage. The real fix is a
+# 74LVC245 buffer powered from 3V3 - 5 V tolerant inputs, VIH 2.0 V, about
+# EUR 1. A resistor divider does NOT work: 10k/20k turns 3.3 V into 2.2 V,
+# below the C6's VIH of ~2.5 V.
+#
+# --- HOW TO RUN -------------------------------------------------------------
+#
+#   Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+#   .\.venv\Scripts\python.exe -m esphome run esphome\pinmap.yaml --device COM3
+#
+# Flash WITH logs attached. Do not use --no-logs and reconnect after - the log
+# is not replayed across a reconnect, and a sweep run was lost that way.
+#
+# CHECK THE BOOT BANNER'S "compiled on" TIMESTAMP against the build you just
+# made. An OTA that browns out during boot is rolled back by the bootloader,
+# and the device then prints a complete, plausible report FROM THE OLD IMAGE.
+# "OTA successful" does not tell you which image is running.
+#
+# --- RUN LOG ----------------------------------------------------------------
+#
+# Record every run here. Date, what was wired, what came out.
+#
+# --- Run 1, 2026-11-10, idle capture, two consecutive reports ---------------
+#
+# Flashed over SERIAL, not OTA, so no rollback risk. Banner matched the build
+# (compiled 2026-11-10 23:06:59).
+#
+#   # label  now  edges  edge/s   high%   min_hi min_lo  max_hi  max_lo  solo%
+#   0 D2>L2   1  16383  1398.9   93.0%       15     17   90405     233   100%
+#   1 D1>L3   0      0     0.0      0%  static LOW
+#   2 D9>L5   0      0     0.0      0%  static LOW
+#   3 D5>L7   1      0     0.0    100%  static HIGH
+#   4 D4>L4   1      0     0.0    100%  static HIGH
+#   5 D10>L6  1      0     0.0    100%  static HIGH
+#
+# Reproduced exactly in the second capture 60 s later (1399.0 edge/s, 93.0%).
+#
+# >>> FINDING 1: LCD PIN 2 IS THE DATA LINE. <<<
+#
+# Three independent quantities agree with the 2026-09 decode of the old
+# wiring, and none of them was tuned to match:
+#
+#   duty cycle    93.0% high      old DATA line: 92.9% high
+#   edge rate     1399 edge/s     old DATA line: 1186 edge/s
+#   max_hi        90405 us        documented inter-frame gap: ~90 ms
+#   frame count   117 in 11.71 s  = 10.0 frames/s, the documented refresh
+#
+# It is NOT the clock. The clock is documented at 6648 edge/s and 96.0% high;
+# this line is 4.75x too slow and its duty cycle matches data, not clock.
+#
+# >>> FINDING 2: THE CLOCK IS NOT AMONG THE SIX WIRED PINS. <<<
+#
+# This is the load-bearing claim, so it was checked against the failure mode
+# that has produced false negatives in this project before - a line chattering
+# faster than the ISR can resolve, which reports as "static, 0 edges" while
+# still burning the buffer (see run 10c of sweep.yaml).
+#
+# It is not happening here, and the proof is the isr_calls counter. Note that
+# bus_sweep.cpp never resets isr_calls_ in start_capture(), so it is a LIFETIME
+# counter and its absolute value means nothing. Its RATE is what matters:
+#
+#   23:20:18   188020 isr calls
+#   23:21:18   271880 isr calls
+#   delta       83860 over 60 s  =  1398 isr/s
+#
+# D2>L2 alone produced 1399 edge/s. The interrupt rate for the WHOLE SIX-PIN
+# TAP equals the edge rate of ONE line, to 0.1%. Five of the six generate no
+# interrupts whatsoever, so their silence is real and not a sampling artefact.
+#
+# The coincidence matrix is all zeros, consistent with one moving line.
+#
+# >>> CONSEQUENCE: one more wire is needed. The clock must be on LCD pin 8 or
+# >>> pin 9 - the only unwired positions that are not rails. Pins 0 and 1 are
+# >>> VEE and VDD and must never be wired.
+#
+# The 2026-09 meter readings point at PIN 8, and the arithmetic is tight: a
+# line high 96.0% of the time (the documented clock duty) with a 3.34 V high
+# level time-averages to 0.960 x 3.34 = 3.21 V, and pin 8 measured 3.20 V.
+# Pin 9 measured 3.34 V, which is a full-time high. Treat as a strong lead
+# rather than a result - those readings were taken against a floating
+# reference and the README says to re-measure them.
+#
+# >>> NOT A FINDING: the static levels of the other five. The 2026-09 table
+# >>> called LCD pin 4 VSS/GND at 0 V, but D4>L4 reads static HIGH here, and
+# >>> LCD 3 and 5 read LOW where the old table called them 3.33 V and 3.34 V
+# >>> logic. The old table disagrees with this capture on four of six pins.
+# >>> That is expected - it was measured against a floating reference, which
+# >>> is exactly why the README says to re-measure - but it means the old
+# >>> voltage table can no longer be used to identify GROUND. Meter it.
+
+substitutions:
+  # Distinct node name so this can coexist with anything flashed from
+  # live.yaml or sweep.yaml. Two nodes claiming one mDNS hostname is a
+  # genuinely confusing failure.
+  name: hauswasserwerk-pinmap
+  friendly_name: Hauswasserwerk Pinmap
+
+  # MODE is now a SINGLE pin against XIAO GND, not the old D7+D8 pair.
+  #
+  # The old config drove both D7 and D8 because which of the switch's two
+  # terminals was the grounded one had not been recorded - so it pulled both
+  # and relied on grounding the already-grounded one being a no-op. That guess
+  # is retired: the switch now has one terminal on D8 and the other on XIAO
+  # GND, so pulling D8 low IS the press. D7/GPIO17 is unconnected and must not
+  # be driven.
+  mode_pin: GPIO19 # D8
+  mode_press_ms: 120ms
+  mode_press_ms_int: "120"
+
+packages:
+  common: !include common.yaml
+
+bus_sweep:
+  id: header_sweep
+
+  # 16384 samples x 8 B = 128 kB, the schema maximum, allocated once at setup.
+  #
+  # WINDOW LENGTH IS THE NUMBER TO WATCH. The clock alone runs ~6600 edge/s
+  # and data ~1200, so the pair fills this buffer in roughly 0.5-0.6 s. That
+  # is fine here - the display bus free-runs and needs no stimulus, and half a
+  # second is five full frames, many times what the decode needs.
+  #
+  # It does mean a MODE press can never land inside the window. Do not read an
+  # unprovoked capture as evidence about button lines. That question belongs
+  # to live.yaml's binary sensors, which sit in Home Assistant indefinitely.
+  capacity: 16384
+
+  # Let WiFi and the API associate first, so the capture is not competing with
+  # association for CPU.
+  settle_delay: 15s
+
+  # Must stay below the 60 s interval re-arm below, or a capture could be
+  # restarted at the moment it expires and loop forever without reporting.
+  # Irrelevant in practice here because the buffer fills in under a second,
+  # but it costs nothing to keep the invariant.
+  capture_timeout: 30s
+
+  # Byte-boundary signal for the HD44780 hypothesis only. Generous on purpose:
+  # a value below the true inter-nibble gap corrupts every byte.
+  idle_gap: 200us
+  columns: 16
+
+  # All six wired lines, every one an input, none ever driven.
+  #
+  # All six GPIOs are below 32, so a single GPIO_IN_REG read captures every
+  # line atomically. No register tearing, and that is what makes the
+  # net-identity test valid - two pins on one net must agree in EVERY sample
+  # because a sample is one atomic read.
+  pins:
+    # The four logic lines. CLK and DATA are two of these four.
+    - pin: {number: GPIO2, mode: {input: true}}
+      label: "D2>L2"
+    - pin: {number: GPIO1, mode: {input: true}}
+      label: "D1>L3"
+    - pin: {number: GPIO20, mode: {input: true}}
+      label: "D9>L5"
+    - pin: {number: GPIO23, mode: {input: true}}
+      label: "D5>L7"
+
+    # The two 0 V lines. Expected static LOW with zero edges for the whole
+    # capture. These are in the tap as CONTROLS, not candidates:
+    #
+    #   - D4>L4 is VSS. If the ground bond is good it is pinned at 0 V and
+    #     silent. If it chatters, or shows 50 Hz, the bond did not take and
+    #     NOTHING else in the report means anything. This is the single most
+    #     useful line in the capture and it is the one expected to do least.
+    #   - D10>L6 is RW strapped low. Same expectation, different reason.
+    #
+    # A previous investigation burned three runs on a floating reference that
+    # looked exactly like real data. Having true VSS in the tap makes that
+    # failure mode self-announcing for the first time.
+    - pin: {number: GPIO22, mode: {input: true}}
+      label: "D4>L4"
+    - pin: {number: GPIO18, mode: {input: true}}
+      label: "D10>L6"
+
+  verdict:
+    name: "Sweep Verdict"
+
+# --- MODE injection ---------------------------------------------------------
+#
+# One pin, open drain, pulling D8 down to GND. The switch's other terminal is
+# already at GND, so "short D8 to GND" and "press the button" are the same
+# electrical event.
+#
+# OPEN DRAIN IS THE SAFETY PROPERTY, not a style preference. An open-drain pin
+# can only ever sink. It cannot push 3.3 V onto a line the pump's MCU drives,
+# so the worst case if the wire is on the wrong pad is a pin held low rather
+# than two push-pull drivers fighting each other.
+#
+# `inverted: true` so that turn_on means pressed. The off state releases the
+# line rather than pulling it down, and the pin is a plain high-Z input before
+# ESPHome configures it - so boot, OTA and watchdog resets cannot phantom
+# press. That matters: a spurious press can advance the pump into AlwaysOn,
+# which has NO DRY-RUN PROTECTION.
+output:
+  - platform: gpio
+    id: mode_line
+    pin:
+      number: ${mode_pin}
+      mode:
+        output: true
+        open_drain: true
+      inverted: true
+
+script:
+  - id: press_mode
+    # `single` drops an overlapping run rather than queueing it, so a double
+    # click cannot stack presses or leave the line held low by one run while
+    # another releases it.
+    mode: single
+    then:
+      # Timestamping the COMMAND is a different fact from the board having
+      # received it, and separating those two is what stops a null result
+      # being manufactured: if the log shows a press and nothing responds,
+      # the fault is between the GPIO and the switch, not in the firmware.
+      - logger.log:
+          level: WARN
+          format: "MODE press: contact CLOSED"
+      - output.turn_on: mode_line
+      - delay: ${mode_press_ms}
+      - output.turn_off: mode_line
+      - logger.log:
+          level: WARN
+          format: "MODE press: contact OPEN after %u ms"
+          args: ["(unsigned) ${mode_press_ms_int}"]
+      # The panel is not finished when the contact opens. A press into Time
+      # Mode produces three screens over 21 s as its menu opens and times out.
+      - delay: 400ms
+
+# Re-arm on a timer, so this produces a TIME SERIES rather than one reading
+# taken 15 s after boot.
+#
+# Added because a one-shot boot capture turned out to be a trap: two runs on
+# identical firmware and wiring once disagreed completely about whether a line
+# was active, and both were true when taken. A header that changes behaviour
+# between captures cannot be characterised by one capture.
+#
+# DELIBERATELY NO MODE PRESS HERE. This re-arms only, so it is safe to leave
+# running unattended - the pump is never actuated and each report is a pure
+# observation. Exercising the board stays on the button, where a human decides.
+interval:
+  - interval: 60s
+    then:
+      - lambda: "id(header_sweep).start_capture();"
+
+button:
+  - platform: template
+    name: "Re-run Sweep"
+    icon: mdi:refresh
+    entity_category: diagnostic
+    on_press:
+      - lambda: "id(header_sweep).start_capture();"
+
+  # Restores the panel by hand if the pump ends up in the wrong mode. MODE
+  # walks Standby -> Automatic -> Time -> Always On -> Standby.
+  - platform: template
+    name: "Press MODE"
+    icon: mdi:gesture-tap-button
+    on_press:
+      - script.execute: press_mode
+
+# INFO, not DEBUG. The sweep's report is already a wall of INFO and the
+# findings are emitted at WARN so they stand out inside it.
+logger:
+  level: INFO
+  logs:
+    wifi: INFO
+    wifi_esp32: INFO
+    api: INFO
+    mdns: INFO

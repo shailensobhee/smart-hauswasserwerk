@@ -1,0 +1,299 @@
+# ============================================================================
+# MODE WALK - press MODE and read the screen that comes back
+# ============================================================================
+#
+# recover.yaml proved the display can be decoded from LCD pin 2 alone, with no
+# clock wire. But it proved it against ONE static screen ("Time Mode / NOT
+# SET"), captured eight times. That is reproducibility, not generality: eight
+# copies of the same screen cannot show that the decoder handles a DIFFERENT
+# screen, and a decoder that only ever emits the one string it was tuned on is
+# indistinguishable from a decoder that is wrong.
+#
+# This run settles it. Walk the MODE cycle and decode what comes back at each
+# step. The expected screens are known in advance from the 2026-09 button
+# mapping, so this is a known-answer test with four answers instead of one.
+#
+#   Standby Mode -> Automatic Mode -> Time Mode -> Always On -> Standby Mode
+#
+# The pump was power-cycled on 2026-11-11, so it starts in STANDBY (the
+# deterministic power-on state). Four presses return it to Standby.
+#
+# --- !!! THIS FIRMWARE ACTUATES THE PUMP !!! --------------------------------
+#
+# Every other capture in this project is passive. This one is not. The MODE
+# cycle passes through AlwaysOn, which is an UNCONTROLLED CONTINUOUS RUN WITH
+# NO DRY-RUN PROTECTION. If the pump is primed and has no water, that is the
+# condition that damages it.
+#
+# Three things keep that bounded, and they are the reason this file exists
+# rather than a quick edit to recover.yaml:
+#
+#   1. The AlwaysOn dwell is its own parameter, set to the shortest value that
+#      still captures enough frames to decode (1.2 s ~ 12 frames; one frame is
+#      enough to decode, twelve is enough to cross-check).
+#   2. The walk is a FIXED, BOUNDED sequence of exactly four presses that ends
+#      where it began. It cannot free-run, and there is no re-arm timer.
+#   3. It does not start for ${abort_window} after boot, logged loudly, so
+#      pulling USB power aborts before anything is actuated.
+#
+# Do not add a re-arm interval to this file. The passive sweeps re-arm because
+# observing twice is free; actuating twice is not.
+#
+# --- HOW TO RUN -------------------------------------------------------------
+#
+#   Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+#   .\.venv\Scripts\python.exe -m esphome run esphome\modewalk.yaml --device COM3
+#
+# Then:
+#   python tools/walk.py <logfile>
+#
+# --- RUN LOG ----------------------------------------------------------------
+#
+# 2026-11-11, run 1. PASS. The predicted cycle came back in order.
+#
+#   predicted: Standby -> Automatic -> Time Mode -> Always On -> Standby
+#   observed : Standby -> Automatic -> Time Mode -> Always On -> Standby
+#
+#   695 frames, 4 presses, pump left resting in Standby. Capture saved to
+#   captures/2026-11-11-modewalk.txt. Decode with tools/walk.py.
+#
+#   Screens decoded (14 distinct, including every documented one):
+#     [  Standby Mode  ] [                ]
+#     [ Automatic Mode ] [                ]
+#     [   Time Mode    ] [                ]
+#     [Time Now   00:00] [Save  Set   Exit]   <- menu, opened by itself
+#     [   Time Mode    ] [    NOT SET     ]   <- menu timed out by itself
+#     [   Always On    ] [Not Recommended ]
+#
+#   The Time Mode leg reproduced the 2026-09 three-screen sequence from a
+#   single press exactly, including the self-opening menu and its ~21 s
+#   timeout. "Not Recommended" had been listed as a known string but never
+#   actually observed before this run.
+#
+#   Bit period fitted over 89193 runs: 25.50 us - the SAME value recover.yaml
+#   got from a different capture of a different screen. The period is a
+#   property of the panel clock, as assumed.
+#
+# --- THE DEFECT, stated plainly ---------------------------------------------
+#
+#   690 / 695 frames decoded cleanly (99.28%). FIVE did not (0.72%).
+#
+#   These are NOT the panel caught mid-redraw, which is what they look like at
+#   first and what it would be convenient to call them. Each corrupt frame sits
+#   between two CLEAN frames of the SAME screen with the SAME edge count and
+#   the SAME span - e.g. frame 168 is 120 edges / 9708 us, and so are its
+#   neighbours 167 and 169, which both read "Standby Mode" correctly. The panel
+#   sent the same bits; the recovery garbled them.
+#
+#   The signature is a single bit slip: the text is correct up to a point and
+#   then noise all the way to the end of the line, which is what one inserted
+#   or dropped bit does to every word after it.
+#
+#     [  Standa<?&722??]   correct through "  Stand"
+#     [   Ti??@????@@@@]   correct through "   Ti"
+#
+#   Two things stop this mattering, and both are design properties rather than
+#   luck:
+#     - each line is located by its own marker scan, so a slip in line 1 does
+#       not damage line 2. Frame 480 has a corrupt line 1 and a perfect
+#       "NOT SET" on line 2.
+#     - the panel repeats the screen ~10x/s, so the next frame is clean.
+#
+#   MITIGATION FOR PRODUCTION: majority-vote the decoded text across three
+#   consecutive frames, preferring candidates with no '?' in them. MEASURED on
+#   both captures: 0 bad frames out of 1391 windows. Do not ship a
+#   single-frame read.
+#
+#   The "prefer clean" part is not decoration. Plain majority voting leaves a
+#   residual precisely at SCREEN TRANSITIONS, where all three frames in the
+#   window differ and there is no majority to find. A '?' is a self-identifying
+#   decode failure, so preferring a clean candidate costs nothing and takes the
+#   residual from 2/693 to 0/693.
+#
+# --- Run 2, 2026-11-11, repeat of the same walk -----------------------------
+#
+#   PASS again. Identical cycle, identical fitted bit period of 25.50 us -
+#   now the THIRD independent capture to land on that value.
+#
+#     frames 700, clean 690 (98.57%), bit-slipped 9, no marker found 1
+#     (run 1 was 695 / 690 clean / 5 slipped / 0 unmarked)
+#
+#   Combined: 1380 of 1395 frames clean, ~98.9%.
+#
+#   >>> THE SLIPS ARE RANDOM, NOT CONTENT-DEPENDENT. <<<
+#
+#   This matters because it is what makes voting legitimate. If certain bit
+#   patterns quantised badly, every frame of that screen would decode wrong
+#   IDENTICALLY and all three voters would be wrong together. Two tests, both
+#   in tools/compare.py:
+#
+#   1. Per-screen error rates all sit near the global ~1%, not near 100%:
+#        "Standby Mode"      408 frames 0.74%  |  411 frames 0.97%
+#        "Time Now   00:00"  196 frames 0.00%  |  199 frames 0.50%
+#        "Automatic Mode"     30 frames 0.00%  |   30 frames 6.67%
+#        "Time Mode"          32 frames 3.12%  |   28 frames 3.57%
+#      The small screens swing because they have few frames, not because they
+#      are special - 2/30 is one slip away from 0/30.
+#
+#   2. Repeated failures of ONE screen produce DIFFERENT garbage every time.
+#      "Standby Mode" failed 3x in run 1 -> 3 distinct wrong renderings, and
+#      4x in run 2 -> 4 distinct wrong renderings. Deterministic corruption
+#      cannot do that.
+#
+#   A WRONG TEST THAT WAS TRIED FIRST, recorded so it is not tried again:
+#   "did the same screen slip in both runs?" reported SYSTEMATIC, confidently
+#   and incorrectly. Standby and Time Mode slipped in both runs - but those are
+#   simply the screens that are on display for the most frames, so at a ~1%
+#   random rate they are near-certain to slip in both. The test had no base
+#   rate in it and would have called pure noise systematic.
+#
+#   Also noted: the longest run in this capture is 44563 us = 1748 bit periods,
+#   far beyond the ~14 where quantisation error would slip a bit. It is an idle
+#   gap, not data, and it is harmless ONLY because each line is found by an
+#   independent marker scan rather than by counting bits from the frame start.
+#   That is load-bearing - do not "optimise" the scan into a fixed offset.
+
+substitutions:
+  name: hauswasserwerk-modewalk
+  # Keep this short: common.yaml builds the fallback AP SSID as
+  # "${friendly_name} Fallback", and ESPHome caps an SSID at 32 characters.
+  # "Hauswasserwerk Mode Walk Fallback" is 33 and fails config validation.
+  friendly_name: Hauswasserwerk Walk
+
+  mode_pin: GPIO19 # D8, other side of the switch on XIAO GND
+  mode_press_ms: 120ms
+
+  # Time to yank USB power before the first press actuates anything.
+  abort_window: 20s
+
+  # Dwell AFTER each press, before the next one. Long enough for the panel to
+  # settle and emit several frames at ~10 frames/s.
+  dwell: 3s
+
+  # AlwaysOn gets its own, much shorter dwell. This is the pump-running leg,
+  # and the user confirmed 2026-11-11 that the pump is DRY - so this is the one
+  # parameter in the project that should be as small as the measurement allows,
+  # not as large as is convenient. 600 ms is ~6 frames at 10 frames/s, and ONE
+  # frame is enough to decode a screen. The mode name appears immediately on
+  # the press (2026-09 button mapping: the mode screen is the +0.0 s event),
+  # so there is nothing to wait for.
+  dwell_alwayson: 600ms
+
+  # The final leg lands back on Time Mode, whose menu opens by itself ~0.8 s
+  # after the press and times out ~21 s later. Dwelling through all of it is
+  # free decoder material: three different screens from one press.
+  dwell_timemode: 25s
+
+packages:
+  common: !include common.yaml
+
+# LCD pin 2, the data line. XIAO D2 = GPIO2.
+#
+# NOTE: LCD pin 3 is GROUND (0 ohm to board ground, metered 2026-11-11), which
+# is why XIAO D1/GPIO1 appears nowhere in this file. It must never be driven.
+edge_dump:
+  pin:
+    number: GPIO2
+    mode:
+      input: true
+  frame_gap: 1ms
+  min_edges: 40
+
+  # The walk runs 3 + 3 + 25 + 0.6 + 3 s of dwell plus four presses, so about
+  # 35 s of panel activity at ~10 frames/s. 700 frames is comfortably more than
+  # it can produce, so the capture is bounded by the walk finishing rather than
+  # the other way round - a capture that stops mid-walk would be worthless.
+  max_frames: 700
+
+# Open drain is the safety property: the pin can only sink, so a wire on the
+# wrong pad holds a line low rather than fighting the pump's MCU. `inverted`
+# makes turn_on mean pressed, and leaves the line released at boot - a reset
+# cannot phantom press.
+output:
+  - platform: gpio
+    id: mode_line
+    pin:
+      number: ${mode_pin}
+      mode:
+        output: true
+        open_drain: true
+      inverted: true
+
+script:
+  - id: press_mode
+    mode: single
+    then:
+      # The marker the analysis tool keys on. Logged at ERROR so it cannot be
+      # lost among the edge dumps, which are INFO.
+      - logger.log:
+          level: ERROR
+          format: ">>> MODE PRESS"
+      - output.turn_on: mode_line
+      - delay: ${mode_press_ms}
+      - output.turn_off: mode_line
+
+  # The predictions below are written BEFORE the run, from the 2026-09 button
+  # mapping. That is the whole value of this test: the decoder has to produce
+  # the predicted text at the predicted moment, four times, or it is wrong.
+  #
+  # Starting state is STANDBY, because the pump was power-cycled on 2026-11-11
+  # and StandbyMode is the deterministic power-on state. Starting from Standby
+  # rather than Time Mode is strictly better here:
+  #   - AlwaysOn becomes the THIRD press instead of the first
+  #   - the walk ENDS on Standby, the safe resting state, instead of Time Mode
+  - id: mode_walk
+    mode: single
+    then:
+      - logger.log:
+          level: ERROR
+          format: ">>> WALK: baseline, expect Standby Mode"
+      - delay: ${dwell}
+
+      - script.execute: press_mode
+      - logger.log: {level: ERROR, format: ">>> WALK 1/4: expect Automatic Mode"}
+      - delay: ${dwell}
+
+      # The long dwell is MANDATORY on this leg, not generosity. A press into
+      # Time Mode opens a menu by itself ~0.8 s later which times out ~21 s
+      # after that, and pressing MODE while that menu is open may navigate the
+      # menu instead of changing mode - which would desynchronise the whole
+      # walk and could write a timer setting. Wait it out.
+      - script.execute: press_mode
+      - logger.log: {level: ERROR, format: ">>> WALK 2/4: expect Time Mode, then its menu, then NOT SET"}
+      - delay: ${dwell_timemode}
+
+      - script.execute: press_mode
+      - logger.log: {level: ERROR, format: ">>> WALK 3/4: expect Always On  [PUMP RUNS - DRY]"}
+      - delay: ${dwell_alwayson}
+
+      - script.execute: press_mode
+      - logger.log: {level: ERROR, format: ">>> WALK 4/4: expect Standby Mode, back at the start"}
+      - delay: ${dwell}
+
+      - logger.log:
+          level: ERROR
+          format: ">>> WALK COMPLETE - resting in Standby, no further presses"
+
+esphome:
+  on_boot:
+    # After the tap and the output are configured, so the first press cannot
+    # race pin setup.
+    priority: -100
+    then:
+      - logger.log:
+          level: ERROR
+          format: ">>> MODE WALK ARMED. This firmware ACTUATES THE PUMP."
+      - logger.log:
+          level: ERROR
+          format: ">>> Pull USB power NOW to abort. Starting in ${abort_window}."
+      - delay: ${abort_window}
+      - script.execute: mode_walk
+
+logger:
+  level: INFO
+  logs:
+    wifi: WARN
+    wifi_esp32: WARN
+    api: WARN
+    mdns: WARN
+    sensor: WARN
