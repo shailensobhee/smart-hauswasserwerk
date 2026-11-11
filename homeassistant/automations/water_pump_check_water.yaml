@@ -1,0 +1,39 @@
+# Check Water (dry-run) alert for the pump.
+#
+# The manual: with no flow/pressure the pump runs 60 s, retries 3x, stops and
+# shows "Check Water". It does NOT restart itself when water returns - a human
+# has to intervene. So this firing means the pump is DOWN until someone acts.
+#
+# Trigger is edge-only (off -> on): it alerts once per fault, not repeatedly
+# while the fault stands.
+#
+# NOTE: set your own notify target below. Replace notify.mobile_app_YOUR_PHONE
+# with your device (e.g. a notify group so you can fan out to several phones).
+# Include this file via `automation: !include_dir_merge_list automations/` or
+# paste the body into automations.yaml.
+
+- id: water_pump_check_water_alert
+  alias: Water Pump - Check Water alert
+  description: Notify when the pump shows Check Water (dry-run / low water).
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.water_pump_check_water
+      from: 'off'
+      to: 'on'
+  condition: []
+  action:
+    - action: notify.mobile_app_YOUR_PHONE
+      data:
+        title: "💦 Water Pump: Check Water"
+        message: >-
+          The pump is showing CHECK WATER - check the water supply / prime
+          the pump. It will not restart on its own.
+        data:
+          tag: water_pump_check_water
+          channel: Water Pump
+    - action: persistent_notification.create
+      data:
+        title: "💦 Water Pump: Check Water"
+        message: The pump is showing CHECK WATER.
+        notification_id: water_pump_check_water
+  mode: single
