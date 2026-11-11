@@ -657,15 +657,32 @@ use; it is kept for reference and for other panels.
 
 **This is the record that was missing, and it is the most expensive datum in
 the project: six wires, 24 hours of soldering, because the LCD header pins are
-extremely close together.** Treat it as canonical. It is duplicated in
-[esphome/pinmap.yaml](esphome/pinmap.yaml) and in project memory. Change it
-here first if the wiring ever changes.
+extremely close together.** Treat it as canonical. It is duplicated in project
+memory and in [esphome/live.yaml](esphome/live.yaml)'s `clocked_tap` block, and
+it is the one to change first if the wiring ever moves.
+
+> **The two rows that matter, in one line: LCD pin 1 = CLOCK → XIAO D0/GPIO0,
+> LCD pin 2 = DATA → XIAO D2/GPIO2.** Everything else on the header is a
+> ground or a static level.
+>
+> The CLOCK row was **missing from this table until 2026-11-11**. The table was
+> written on 2026-11-10, a day before the clock was identified, and nothing
+> added the row afterwards — so the project's own canonical wiring record was
+> silently incomplete on the single most expensive datum it holds. Found by
+> re-reading it rather than by trusting that it had been updated. If a wire
+> moves, change this table in the same action, not afterwards.
+>
+> ⚠ [esphome/pinmap.yaml](esphome/pinmap.yaml) is a **historical diagnostic and
+> is wrong about pin 1** — it carries the discredited "+4.87 V VDD, NEVER
+> connect it" line and calls the clock D1. It is kept for its run narrative
+> only; it has a correction banner at the top. Do not take wiring from it.
 
 Numbering convention: **LCD facing you, reading left to right, header positions
 are 0 to 9.**
 
 | XIAO | GPIO | LCD pin | 2026-09 meter (floating ref — **unreliable**) | Role |
 | --- | --- | --- | --- | --- |
+| D0 | 0 | **1** | ~~+4.87 V "VDD"~~ — **wrong**, 3.17 V metered 2026-11-11 | **CLOCK — confirmed by capture, rising edge** |
 | D2 | 2 | **2** | 3.23 V logic | **DATA — proven by decoded text** |
 | D1 | 1 | **3** | 3.33 V logic | **GND — 0 Ω to board ground, metered 2026-11-11** |
 | D4 | 22 | **4** | 0 V | static HIGH — *not* ground |
