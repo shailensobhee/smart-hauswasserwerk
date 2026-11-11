@@ -12,6 +12,25 @@
 #
 # =========================== READ THIS FIRST ===============================
 #
+# HOW THE LCD PINS ARE NUMBERED. Every "LCD pin N" below depends on this, and
+# the warning two lines down is only safe if you read it the same way we wrote
+# it:
+#
+#   LCD FACING YOU, READING LEFT TO RIGHT, the ten header positions are
+#
+#       0 1 2 3 4 5 6 7 8 9
+#
+#   Zero-based, and position 0 is the LEFTMOST. Get the direction backwards
+#   and "never connect pin 0" points at pin 9 instead, which is exactly the
+#   mistake this block exists to prevent.
+#
+# The same convention is stated in README.md (twice) and in project memory.
+# It is repeated here because this is the file someone opens on its own when
+# they are holding a soldering iron.
+#
+#   wired:     1 (CLOCK, D0)  2 (DATA, D2)  3 (GND, D1)  4 (D4)  5 (D9)  7 (D5)
+#   not wired: 0, 6, 8, 9
+#
 # ONE LCD header pin must NEVER sit on an ESP32-C6 GPIO:
 #
 #   LCD pin 0   measured -1.53 V   V0/VEE contrast bias. A negative rail
