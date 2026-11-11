@@ -137,9 +137,12 @@ void ClockedTap::loop() {
   if ((now - this->last_stats_ms_) >= STATS_INTERVAL_MS) {
     const uint32_t elapsed = now - this->last_stats_ms_;
     const uint32_t df = this->frames_ - this->last_stats_frames_;
-    ESP_LOGD(TAG, "%.1f frames/s, %u edges, %u dropped, %u undecoded, %u garbled, %u slipped",
+    ESP_LOGD(TAG,
+             "%.1f frames/s, %u edges, %u dropped, %u undecoded, %u garbled, %u slipped, %u "
+             "untagged",
              df * 1000.0f / (float) elapsed, (unsigned) this->edges_, (unsigned) this->dropped_,
-             (unsigned) this->undecoded_, (unsigned) this->garbled_, (unsigned) this->slipped_);
+             (unsigned) this->undecoded_, (unsigned) this->garbled_, (unsigned) this->slipped_,
+             (unsigned) this->untagged_);
     if (this->dropped_ > 0)
       ESP_LOGW(TAG, "%u samples dropped - frames spanning a drop are corrupt", (unsigned) this->dropped_);
     this->last_stats_ms_ = now;
@@ -215,18 +218,12 @@ uint8_t ClockedTap::word_data_(uint16_t start) const {
 /// (000100000 repeated) only ever has isolated 1s. The marker cannot be
 /// synthesised out of blank cells. The slip happens after a GENUINE marker.
 ///
-/// The rule is safe in both directions. A line of 16 '@' is meaningless on
-/// this pump - no screen in the whole mode cycle contains one - so reading it
-/// as "the panel blanked this line and we were one bit late" is the only
-/// interpretation with a physical meaning behind it.
-static bool slipped_blank(const std::string &s) {
-  if (s.empty())
-    return false;
-  for (const char c : s)
-    if (c != '@')
-      return false;
-  return true;
-}
+/// The rule is safe in both directions. No screen in this pump's whole mode
+/// cycle contains a literal '@', so reading it as "that cell is a space and we
+/// were one bit late" is the only interpretation with a physical meaning
+/// behind it. It is applied per CELL in decode_frame_() below, which also
+/// covers a PARTIAL slip - a line whose text decodes correctly and whose
+/// trailing spaces do not ("NOT SET @@@@", seen live at 21:38:55).
 
 /// Find each line marker in the frame and read the characters after it.
 ///
@@ -237,34 +234,122 @@ static bool slipped_blank(const std::string &s) {
 /// occasional slipped clock edge - a corrupted line costs that line, not the
 /// rest of the frame.
 ///
-/// LINES ARE SLOTTED BY ORDER, NOT BY BIT OFFSET, and that is deliberate: the
-/// first marker found is line 1, the second is line 2, wherever they sit. The
-/// loop below does this naturally by appending to lines_[nlines_++], so do not
-/// "improve" it into an offset test. One frame in captures/2026-11-11-modewalk
-/// .txt carries its two markers at bits 1777 and 1968 instead of the usual 27
-/// and 218 - an idle gap inside the frame - and any absolute-offset rule drops
-/// a line there. tools/walk.py::read_slots() was fixed for exactly this.
+/// LINES ARE SLOTTED BY THE ROW TAG, NOT BY ORDER AND NOT BY BIT OFFSET.
+///
+/// Never by bit offset: one frame in captures/2026-11-11-modewalk.txt carries
+/// its two markers at bits 1777 and 1968 instead of the usual 27 and 218 - an
+/// idle gap inside the frame - and any absolute-offset rule drops a line there.
+/// tools/walk.py::read_slots() was fixed for exactly this.
+///
+/// And no longer by order either, which this code did until 2026-11-11. THE
+/// PANEL DOES NOT ALWAYS SEND ROW 1 FIRST. On the Time edit screen (press SET
+/// from `Time Now`) it sends row 2 first, so Home Assistant showed the screen
+/// upside down - `Next + -` on top of `Time Now 00:00`. Reported by the user
+/// reading the glass, and visible in captures/live_log.txt from 04:15:10 on.
+///
+/// The panel says which row it means. The 9-bit word immediately BEFORE each
+/// `7C 40` marker is a command word (flag bit 1) whose payload is the row:
+///
+///     0x00 -> row 1          0x80 -> row 2
+///
+/// Verified by tools/rowtag.py over every frame in captures/live_log.txt:
+/// 563/563 two-marker frames carry a valid and DISTINCT tag on each half - no
+/// unrecognised tags, no frame claiming the same row twice - and the 51 frames
+/// whose halves arrive in the reverse order are exactly, and only, the `Next
+/// + -` edit screen. So this is not a heuristic; it is what the bus says.
+///
+/// The tag also fixes the single-line 191-bit SHORT frame, which the old code
+/// could only ever file as row 1. If the panel refreshes row 2 alone, the tag
+/// puts it in row 2 instead of overwriting row 1 with it.
+///
+/// If any tag in the frame is unrecognised, or two halves claim the same row,
+/// the WHOLE frame falls back to the old append-in-order behaviour, so an
+/// unexpected screen degrades to the previous (mostly-correct) rule rather
+/// than losing a line. See the comment on pass 1 for why the fallback has to
+/// be all-or-nothing per frame rather than per half.
 void ClockedTap::decode_frame_() {
   this->nlines_ = 0;
+  for (uint8_t l = 0; l < MAX_LINES; l++)
+    this->present_[l] = false;
   const uint8_t wb = this->word_bits_;
   const uint16_t marker_span = (uint16_t) (2 * wb);
 
+  // PASS 1: locate the half-frames and read each one's row tag. Nothing is
+  // placed yet, because slotting has to be decided for the frame as a WHOLE.
+  //
+  // Deciding per half is not good enough, and that is measured, not theoretical:
+  // 0x00 and 0x80 differ by a single bit, so ONE flipped bit in a tag makes
+  // half 1 claim row 2. A per-half rule then puts half 1 in row 2 and, finding
+  // row 2 taken, pushes half 2 into row 1 - both lines wrong, i.e. a one-bit
+  // error turns into a full swap. That happened on the very first live run of
+  // this code (21:33:46, `[NOT SET][Time Mode]`, untagged=1), so the frame is
+  // now judged as a unit: trust the tags only when they are ALL valid and all
+  // distinct, otherwise fall back to transmission order, which is what this
+  // decoder used before and is right on every screen except the Time edit.
+  uint16_t offs[MAX_LINES];
+  uint8_t slots[MAX_LINES];
+  uint8_t nhalves = 0;
+  bool tags_usable = true;
+  bool claimed[MAX_LINES] = {};
+
   uint16_t i = 0;
-  while (i + marker_span <= this->nbits_ && this->nlines_ < MAX_LINES) {
+  while (i + marker_span <= this->nbits_ && nhalves < MAX_LINES) {
     if (this->word_data_(i) != this->marker_a_ || this->word_data_(i + wb) != this->marker_b_) {
       i++;
       continue;
     }
 
-    uint16_t j = i + marker_span;
-    char *dst = this->lines_[this->nlines_];
+    uint8_t slot = 0xFF;
+    if (i >= wb) {
+      const uint8_t tag = this->word_data_(i - wb);
+      if (tag == ROW_TAG_1)
+        slot = 0;
+      else if (tag == ROW_TAG_2)
+        slot = 1;
+    }
+    if (slot == 0xFF || claimed[slot])
+      tags_usable = false;  // unrecognised, or two halves claiming one row
+    else
+      claimed[slot] = true;
+
+    offs[nhalves] = i;
+    slots[nhalves] = slot;
+    nhalves++;
+    i += marker_span + (uint16_t) (this->columns_ * wb);
+  }
+
+  this->tags_usable_ = tags_usable;
+  if (!tags_usable)
+    this->untagged_++;
+
+  // PASS 2: place each half and decode its characters.
+  for (uint8_t h = 0; h < nhalves; h++) {
+    const uint8_t slot = tags_usable ? slots[h] : h;
+    if (slot >= MAX_LINES)
+      continue;
+
+    uint16_t j = offs[h] + marker_span;
+    char *dst = this->lines_[slot];
     uint8_t n = 0;
     while (n < this->columns_ && j + wb <= this->nbits_) {
       const uint8_t d = this->word_data_(j);
-      // '?' rather than dropping the character: a corrupted cell should stay
-      // visible and in its column, so a one-bit glitch reads as a glitch
-      // instead of silently shortening the line.
-      if (d >= 0x20 && d < 0x7F) {
+      // '@' IS A SPACE READ ONE BIT LATE - see the block comment above. Recover
+      // it rather than showing it, because on a +1 slip '@' can ONLY have come
+      // from a space: it needs c << 1 == 0x40, so c == 0x20, and no other cell
+      // value on this panel can produce it. (A -1 slip would need c >> 1 ==
+      // 0x40, i.e. c == 0x80 or 0x81, neither of which is a character the
+      // panel draws.) No screen on this pump contains a literal '@', so
+      // rendering it as the space it really is loses nothing and keeps a
+      // partial slip - "NOT SET @@@@", observed live at 21:38:55 - from
+      // looking like a screen change and being published as one.
+      //
+      // '?' for anything else, rather than dropping the character: a corrupted
+      // cell should stay visible and in its column, so a one-bit glitch reads
+      // as a glitch instead of silently shortening the line.
+      if (d == 0x40) {
+        dst[n] = ' ';
+        this->slipped_++;
+      } else if (d >= 0x20 && d < 0x7F) {
         dst[n] = (char) d;
       } else {
         dst[n] = '?';
@@ -274,8 +359,8 @@ void ClockedTap::decode_frame_() {
       j += wb;
     }
     dst[n] = '\0';
+    this->present_[slot] = true;
     this->nlines_++;
-    i = j;
   }
 }
 
@@ -295,12 +380,22 @@ void ClockedTap::end_frame_() {
     return;
   }
 
+  // The debounce key is built in ROW order, with absent rows represented
+  // explicitly. Row order (rather than transmission order) means the edit
+  // screen no longer looks like a brand-new screen each time the panel happens
+  // to flip which row it sends first; '\x01' marks a row this frame did not
+  // carry, so a line-1-only short frame cannot compare equal to a line-2-only
+  // one that happens to hold the same text.
   char screen[MAX_LINES * (MAX_COLUMNS + 1)];
   uint16_t p = 0;
-  for (uint8_t l = 0; l < this->nlines_; l++) {
-    const uint8_t len = (uint8_t) strlen(this->lines_[l]);
-    memcpy(screen + p, this->lines_[l], len);
-    p += len;
+  for (uint8_t l = 0; l < MAX_LINES; l++) {
+    if (!this->present_[l]) {
+      screen[p++] = '\x01';
+    } else {
+      const uint8_t len = (uint8_t) strlen(this->lines_[l]);
+      memcpy(screen + p, this->lines_[l], len);
+      p += len;
+    }
     screen[p++] = '\n';
   }
   screen[p] = '\0';
@@ -330,7 +425,7 @@ void ClockedTap::end_frame_() {
   // clean printable line-2 string ... is far less likely than the debounce
   // silently eating every real warning". That is exactly backwards for ONE
   // corruption, and it is the common one: a +1 bit slip on a blank line renders
-  // as all '@' (see slipped_blank above), which is non-empty, printable, and
+  // as all '@' (see the block comment above decode_frame_), which is non-empty, and
   // differs from the published "" - so it sailed through this bypass at
   // count=1, skipping stable_frames_ entirely, and painted "@@@@@" onto the
   // Standby screen in Home Assistant. The bypass is a real need, so it stays;
@@ -339,8 +434,14 @@ void ClockedTap::end_frame_() {
   //
   // Note the bypass CANNOT be hardened by requiring repeats - "Check Water" is
   // genuinely drawn once and never repeated. That is why it exists.
+  // The bypass is also declined on a frame whose row tags did not come out
+  // valid and distinct. Such a frame has a known bit error in it and was
+  // slotted by the fallback rule, so "line 2 changed" cannot be trusted enough
+  // to skip the debounce - and a genuine one-shot warning like "Check Water"
+  // arrives on a frame with good tags anyway. Without this, a single flipped
+  // tag bit on the Time edit screen publishes a swapped screen immediately.
   bool line2_appeared = false;
-  if (this->nlines_ >= 2) {
+  if (this->present_[1] && this->tags_usable_) {
     // Inline trim (the `trimmed` helper is defined further down the file).
     const char *b2 = this->lines_[1];
     while (*b2 == ' ')
@@ -349,12 +450,19 @@ void ClockedTap::end_frame_() {
     while (e2 > b2 && e2[-1] == ' ')
       e2--;
     const std::string l2(b2, (size_t) (e2 - b2));
-    if (slipped_blank(l2)) {
-      this->slipped_++;
-      ESP_LOGV(TAG, "line 2 is all '@' - bit-slipped blank, not a new screen");
-    } else if (!l2.empty() && (!this->have_published_[1] || l2 != this->published_[1])) {
+    // No '@' test is needed here any more: decode_frame_() already turned a
+    // slipped cell back into the space it was, so a slipped blank arrives as
+    // an empty string and is rejected by the !l2.empty() test below, exactly
+    // like the genuine blank it is.
+    // A candidate containing a '?' is declined too: that cell is already known
+    // to have decoded to a non-character, so the line carries a confirmed bit
+    // error and has no business skipping the debounce. Observed live at
+    // 21:43:22 as "   ?NOT SET", published for one frame before the next good
+    // frame corrected it.
+    const bool has_garbled = l2.find('?') != std::string::npos;
+    if (!l2.empty() && !has_garbled &&
+        (!this->have_published_[1] || l2 != this->published_[1]))
       line2_appeared = true;
-    }
   }
 
   if (!settled && !line2_appeared) {
@@ -377,10 +485,14 @@ void ClockedTap::end_frame_() {
     this->repeats_ = 0;
   }
 
+  // Logged in ROW order, so the log reads like the glass. A row this frame did
+  // not carry prints as `[--absent--]` rather than silently shifting the rows
+  // left - the old `l < nlines_` form made a line-2-only frame look like a
+  // line-1 frame in the log, which is exactly the confusion being fixed here.
   std::string joined;
-  for (uint8_t l = 0; l < this->nlines_; l++) {
+  for (uint8_t l = 0; l < 2; l++) {
     joined += '[';
-    joined += this->lines_[l];
+    joined += this->present_[l] ? this->lines_[l] : "--absent--";
     joined += ']';
   }
   ESP_LOGI(TAG, "%s", joined.c_str());
@@ -420,7 +532,9 @@ void ClockedTap::publish_lines_() {
     // line 2. So: absent => hold last value; present-but-empty => blank via the
     // existing blank_hold timer. This keeps a static warning visible in HA the
     // same way the physical LCD retains it in DDRAM.
-    const bool present = (l < this->nlines_);
+    // Presence is now per-ROW, from the panel's own row tag, not "did the
+    // frame carry at least l+1 lines". See decode_frame_().
+    const bool present = this->present_[l];
     if (!present) {
       this->blank_since_[l] = 0;  // cancel any pending blank; keep current value
       continue;
@@ -432,17 +546,10 @@ void ClockedTap::publish_lines_() {
     // panel is visibly showing. Standing project rule: always read BOTH lines.
     std::string text = trimmed(this->lines_[l]);
 
-    // Second gate on the +1 slip. The bypass above is the path this corruption
-    // actually took, but the ordinary settled path can reach here too if the
-    // slip repeats stable_frames_ times running, and it would publish a screen
-    // of '@' as though it were panel output. Fold it to blank instead: that is
-    // what the panel is really showing. blank_hold still debounces it, so a
-    // single slipped frame cannot blank a line that is genuinely lit.
-    if (slipped_blank(text)) {
-      this->slipped_++;
-      text.clear();
-    }
-
+    // Nothing to undo for the +1 slip here either: decode_frame_() recovers a
+    // slipped cell to its original space, so a slipped blank has already
+    // become an empty string by the time it reaches this point and takes the
+    // genuine-blank path below, debounced by blank_hold like any other blank.
     if (!text.empty()) {
       this->blank_since_[l] = 0;
       if (!this->have_published_[l] || text != this->published_[l]) {

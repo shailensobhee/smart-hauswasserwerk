@@ -25,6 +25,14 @@ static const uint16_t FRAME_BYTES = MAX_FRAME_BITS / 8;
 static const uint8_t MAX_LINES = 4;
 static const uint8_t MAX_COLUMNS = 40;
 
+// The row a half-frame is addressed to, read from the command word immediately
+// before its `7C 40` marker. Established 2026-11-11 by tools/rowtag.py over
+// every frame in captures/live_log.txt (563/563 valid and distinct). The panel
+// does NOT always send row 1 first - the Time edit screen sends row 2 first -
+// so these are what decide the slot. See decode_frame_().
+static const uint8_t ROW_TAG_1 = 0x00;
+static const uint8_t ROW_TAG_2 = 0x80;
+
 /// One clock-edge observation: the whole GPIO input port, latched atomically.
 ///
 /// Same shape as the other components here, and for the same reason: the ISR
@@ -110,6 +118,14 @@ class ClockedTap : public Component {
 
   // --- Decode results ---
   char lines_[MAX_LINES][MAX_COLUMNS + 1]{};
+  // Per-ROW presence, set from the panel's row tag. `nlines_` is only a count
+  // of how many half-frames decoded; it must NOT be used as a presence test,
+  // because a frame can carry row 2 without carrying row 1.
+  bool present_[MAX_LINES]{};
+  // Did this frame's row tags come out all-valid and all-distinct? False means
+  // the frame was slotted by transmission order as a fallback, and so carries
+  // a known bit error - used to decline the one-shot line-2 publish bypass.
+  bool tags_usable_{true};
   uint8_t nlines_{0};
   char prev_screen_[MAX_LINES * (MAX_COLUMNS + 1)]{};
 
@@ -175,6 +191,12 @@ class ClockedTap : public Component {
   // and the only evidence it was happening was '@' appearing in Home
   // Assistant. See slipped_blank() in the .cpp.
   uint32_t slipped_{0};
+  // FRAMES whose row tags were not all valid and distinct, and which therefore
+  // fell back to transmission-order slotting. It was 0 across all 563 captured
+  // frames, but a single flipped bit turns tag 0x00 into 0x80, so a low rate
+  // here is bit errors in the tag word rather than an unknown screen. Sustained
+  // growth means the panel is doing something this decoder has not seen.
+  uint32_t untagged_{0};
   uint32_t last_stats_ms_{0};
   uint32_t last_stats_frames_{0};
 };

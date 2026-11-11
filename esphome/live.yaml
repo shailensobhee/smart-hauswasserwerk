@@ -428,6 +428,56 @@
 # ~0.4 % of frames, was being published as display content and counted nowhere.
 # Any future rise in `slipped` is a wiring/clock-integrity signal, the same way
 # `garbled` is.
+#
+# --- Run 8, 2026-11-11 21:40 - THE PANEL DOES NOT ALWAYS SEND ROW 1 FIRST ----
+#
+# REPORTED by the user, reading the glass: in Time Mode, press SET and the
+# screen is
+#       row 1   Time Now   00:00
+#       row 2   Next    +     -
+# but Home Assistant showed it UPSIDE DOWN. Confirmed in this project's own
+# captures/live_log.txt from 04:15:10 on, so it was never an HA problem - the
+# decoder was slotting the two half-frames by the ORDER they arrive, and on the
+# edit screen the panel transmits ROW 2 FIRST.
+#
+# THE PANEL SAYS WHICH ROW IT MEANS. The 9-bit word immediately before each
+# `7C 40` marker is a command word whose payload is the row address:
+#       0x00 -> row 1          0x80 -> row 2
+# tools/rowtag.py (new) replays every logged frame and checks this: 563 of 563
+# two-marker frames carry a valid and DISTINCT tag on each half - no
+# unrecognised tags, no frame claiming one row twice - and the 51 frames that
+# arrive in reverse order are exactly, and only, the `Next + -` edit screen.
+# Re-slotting by tag changes 51 frames and leaves the other 512 byte-identical.
+#
+# ! THE FALLBACK MUST BE PER FRAME, NOT PER HALF. 0x00 and 0x80 differ by one
+# bit, so a single flipped bit makes half 1 claim row 2; a per-half rule then
+# pushes half 2 into row 1 and BOTH lines come out wrong. That is not
+# theoretical - the first build of this fix did exactly that on its first live
+# run (21:33:46, `[NOT SET][Time Mode]`). The frame is now judged as a unit:
+# tags are trusted only when all valid and all distinct, else the whole frame
+# falls back to transmission order, which is right on every screen but the edit
+# one. Bit-flip test over all 563 captured frames: the frame-wide rule protects
+# 512/512 normal frames; only the edit screen degrades, and only to the old
+# behaviour. A frame that fell back is also barred from the one-shot line-2
+# publish bypass, so it cannot reach HA without passing the debounce.
+#
+# ++ The '@' fix from run 7 was too narrow. A PARTIAL slip leaves the text
+# intact and only the trailing spaces as '@' ("NOT SET @@@@", seen live at
+# 21:38:55), which an all-'@' test misses. Replaced by the sharper rule the
+# arithmetic actually supports: on a +1 slip '@' can ONLY come from a space
+# (c << 1 == 0x40 => c == 0x20), so decode_frame_() maps the cell straight back
+# to a space and counts it. 21 recovered in 90 s with no '@' reaching HA.
+#
+# MEASURED after the fix, ~2 min on the Time Mode screen:
+#   10.0 frames/s, 457709 edges, 0 dropped, 1 undecoded, 30 garbled,
+#   21 slipped, 2 untagged      - and no swapped screen in the log.
+#
+# ? STILL LOOSE: a single-character corruption that stays printable (`NOP SET`
+# for `NOT SET`, 21:43:40) still rides the line-2 bypass into HA for one frame
+# (~60 ms) before the next good frame corrects it. Candidates containing '?'
+# are now declined, which covers the detectable half of this; a corruption that
+# lands on another letter is not detectable from one frame and would need the
+# bypass to be replaced by something cleverer than "publish immediately".
 
 substitutions:
   # ENGLISH THROUGHOUT, changed 2026-11-11 at the user's request. Everything a
