@@ -1,0 +1,161 @@
+# Hermes variant of the pump panel (the version currently deployed to the live
+# Home Assistant instance as of 2026-11-12).
+#
+# This is an ALTERNATIVE to lovelace-card.yaml, kept separate on purpose so it
+# does not clobber the hand-documented version. Two deliberate differences,
+# both driven by Shailen eyeballing the physical product:
+#
+#  1. BUTTON NAMING. Buttons are labelled with the key's PRINTED name
+#     (CHECK / ON OFF / MODE, left to right), with the edit-menu role above
+#     (Next / + / -) and the resting role below (Save / Set / exit). The other
+#     card names them by resting function (SAVE / SET / MODE) and shows the live
+#     role in a strip. Same three physical keys, two label philosophies:
+#       physical key -> press entity:
+#         CHECK  (left)   -> button.water_pump_press_save
+#         ON OFF (middle) -> button.water_pump_press_set
+#         MODE   (right)  -> button.water_pump_press_mode
+#
+#  2. LCD LOOK. A digital 16x2 CELL GRID (each character in its own box, both
+#     lines centred, green-on-black) instead of the blue backlit markdown glass.
+#
+# DEPENDENCY: this card uses custom:button-card (install the resource at
+# /local/community/button-card/button-card.js). The other card is dependency
+# free. Pick whichever you prefer; they drive the same entities.
+
+type: vertical-stack
+cards:
+- type: custom:button-card
+  tap_action:
+    action: none
+  show_icon: false
+  show_name: false
+  show_label: false
+  custom_fields:
+    lcd: "[[[\n  const dead=['unknown','unavailable','None',''];\n  const clean=(s)=>{ if(!s||dead.includes(s))\
+      \ return ''; return s; };\n  let l1=clean(states['sensor.water_pump_display_line_1']?.state).toUpperCase();\n\
+      \  let l2=clean(states['sensor.water_pump_display_line_2']?.state).toUpperCase();\n  const padCenter=(x)=>{\
+      \ x=x.slice(0,16); const total=16-x.length; const l=Math.floor(total/2); const r=total-l; return\
+      \ (' '.repeat(l)+x+' '.repeat(r)).split(''); };\n  const cell=(ch)=>{\n    const c = (ch===' ')\
+      \ ? '' : ch;\n    return `<span style=\"display:inline-flex;align-items:center;justify-content:center;`\n\
+      \         + `width:18px;height:26px;margin:1px;border-radius:2px;`\n         + `background:rgba(57,255,158,0.06);box-shadow:inset\
+      \ 0 0 0 1px rgba(57,255,158,0.10);`\n         + `font-family:'Roboto Mono','DejaVu Sans Mono',monospace;font-size:18px;font-weight:700;`\n\
+      \         + `color:#39ff9e;text-shadow:0 0 6px rgba(57,255,158,.65)\">${c}</span>`;\n  };\n  const\
+      \ row=(arr)=>`<div style=\"display:flex;justify-content:center\">${arr.map(cell).join('')}</div>`;\n\
+      \  return `<div style=\"background:#0b0d10;border:2px solid #000;border-radius:6px;padding:10px\
+      \ 8px;`\n       + `box-shadow:0 2px 6px rgba(0,0,0,.5),inset 0 0 14px rgba(0,0,0,.85)\">`\n    \
+      \   + row(padCenter(l1)) + `<div style=\"height:3px\"></div>` + row(padCenter(l2)) + `</div>`;\n\
+      ]]]"
+  styles:
+    card:
+    - padding: 8px
+    - background: none
+    - box-shadow: none
+    grid:
+    - grid-template-areas: '"lcd"'
+- type: horizontal-stack
+  cards:
+  - type: custom:button-card
+    entity: button.water_pump_press_save
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.water_pump_press_save
+    show_icon: false
+    show_name: false
+    show_label: false
+    custom_fields:
+      top: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">NEXT</span>
+      mid: <span style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:.5px">CHECK</span>
+      bottom: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">SAVE</span>
+    styles:
+      card:
+      - padding: 11px 4px
+      - border-radius: 10px
+      - background: '#2b303b'
+      - box-shadow: 0 2px 5px rgba(0,0,0,.35)
+      grid:
+      - grid-template-areas: '"top" "mid" "bottom"'
+      - grid-template-rows: auto auto auto
+      - gap: 3px
+      custom_fields:
+        top:
+        - align-self: center
+        mid:
+        - align-self: center
+        bottom:
+        - align-self: center
+  - type: custom:button-card
+    entity: button.water_pump_press_set
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.water_pump_press_set
+    show_icon: false
+    show_name: false
+    show_label: false
+    custom_fields:
+      top: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">+</span>
+      mid: <span style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:.5px">ON OFF</span>
+      bottom: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">SET</span>
+    styles:
+      card:
+      - padding: 11px 4px
+      - border-radius: 10px
+      - background: '#2b303b'
+      - box-shadow: 0 2px 5px rgba(0,0,0,.35)
+      grid:
+      - grid-template-areas: '"top" "mid" "bottom"'
+      - grid-template-rows: auto auto auto
+      - gap: 3px
+      custom_fields:
+        top:
+        - align-self: center
+        mid:
+        - align-self: center
+        bottom:
+        - align-self: center
+  - type: custom:button-card
+    entity: button.water_pump_press_mode
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.water_pump_press_mode
+    show_icon: false
+    show_name: false
+    show_label: false
+    custom_fields:
+      top: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">-</span>
+      mid: <span style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:.5px">MODE</span>
+      bottom: <span style="font-size:11px;color:#9fb0c6;letter-spacing:.5px">EXIT</span>
+    styles:
+      card:
+      - padding: 11px 4px
+      - border-radius: 10px
+      - background: '#2b303b'
+      - box-shadow: 0 2px 5px rgba(0,0,0,.35)
+      grid:
+      - grid-template-areas: '"top" "mid" "bottom"'
+      - grid-template-rows: auto auto auto
+      - gap: 3px
+      custom_fields:
+        top:
+        - align-self: center
+        mid:
+        - align-self: center
+        bottom:
+        - align-self: center
+- type: entities
+  entities:
+  - entity: sensor.water_pump_mode
+    name: Mode
+  - entity: binary_sensor.water_pump_check_water
+    name: Dry run - needs attention
+  - entity: binary_sensor.water_pump_valve_closed
+    name: Valve closed
+  - entity: binary_sensor.water_pump_timer_not_set
+    name: Timer not programmed
+  - entity: binary_sensor.water_pump_unprotected_run
+    name: Always On - no dry-run protection
