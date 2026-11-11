@@ -137,9 +137,9 @@ void ClockedTap::loop() {
   if ((now - this->last_stats_ms_) >= STATS_INTERVAL_MS) {
     const uint32_t elapsed = now - this->last_stats_ms_;
     const uint32_t df = this->frames_ - this->last_stats_frames_;
-    ESP_LOGD(TAG, "%.1f frames/s, %u edges, %u dropped, %u undecoded, %u garbled",
+    ESP_LOGD(TAG, "%.1f frames/s, %u edges, %u dropped, %u undecoded, %u garbled, %u slipped",
              df * 1000.0f / (float) elapsed, (unsigned) this->edges_, (unsigned) this->dropped_,
-             (unsigned) this->undecoded_, (unsigned) this->garbled_);
+             (unsigned) this->undecoded_, (unsigned) this->garbled_, (unsigned) this->slipped_);
     if (this->dropped_ > 0)
       ESP_LOGW(TAG, "%u samples dropped - frames spanning a drop are corrupt", (unsigned) this->dropped_);
     this->last_stats_ms_ = now;
@@ -193,6 +193,39 @@ uint8_t ClockedTap::word_data_(uint16_t start) const {
       v = (uint8_t) ((v >> 1) | (this->bit_at_(b + k) << 7));
   }
   return v;
+}
+
+/// THE ONE PRINTABLE MISALIGNMENT: a '@'-only line is a bit-slipped BLANK.
+///
+/// Read a field of spaces one bit late and every cell comes back as '@':
+///
+///     0x20 << 1 == 0x40 == '@'
+///
+/// That single fact is the whole bug. Of the nine alignments a 9-bit word can
+/// be read at, a run of 0x20 renders as ' ' at +0, '@' at +1, and a value
+/// outside 0x20..0x7E (so, '?') at +2 through +8. So +1 is the ONLY slip on
+/// this panel that produces printable text, which means it is the one and only
+/// blind spot in the '?' garbled-cell indicator below - it is not counted as
+/// garbled, it does not look corrupt, and it reaches Home Assistant as a line
+/// of '@' sitting on an otherwise blank Standby screen. Observed live
+/// 2026-11-11 ("Standby" on line 1, "@@@@@" on line 2).
+///
+/// It is NOT a false marker match, which was the first theory: 0x7C is
+/// 01111100 and needs five consecutive 1 bits, while a stream of spaces
+/// (000100000 repeated) only ever has isolated 1s. The marker cannot be
+/// synthesised out of blank cells. The slip happens after a GENUINE marker.
+///
+/// The rule is safe in both directions. A line of 16 '@' is meaningless on
+/// this pump - no screen in the whole mode cycle contains one - so reading it
+/// as "the panel blanked this line and we were one bit late" is the only
+/// interpretation with a physical meaning behind it.
+static bool slipped_blank(const std::string &s) {
+  if (s.empty())
+    return false;
+  for (const char c : s)
+    if (c != '@')
+      return false;
+  return true;
 }
 
 /// Find each line marker in the frame and read the characters after it.
@@ -291,9 +324,21 @@ void ClockedTap::end_frame_() {
   // to 191-bit line-1-only frames - so a changed line 2 never repeats and the
   // stable_frames_ debounce (which exists to reject single-bit line-1 glitches)
   // discards it forever. Fix: if this frame carries a non-empty line 2 that
-  // differs from what is published, accept it now (count=1). A corrupted frame
-  // faking a clean printable line-2 string that differs from the held value is
-  // far less likely than the debounce silently eating every real warning.
+  // differs from what is published, accept it now (count=1).
+  //
+  // !! The original version of this comment claimed "a corrupted frame faking a
+  // clean printable line-2 string ... is far less likely than the debounce
+  // silently eating every real warning". That is exactly backwards for ONE
+  // corruption, and it is the common one: a +1 bit slip on a blank line renders
+  // as all '@' (see slipped_blank above), which is non-empty, printable, and
+  // differs from the published "" - so it sailed through this bypass at
+  // count=1, skipping stable_frames_ entirely, and painted "@@@@@" onto the
+  // Standby screen in Home Assistant. The bypass is a real need, so it stays;
+  // the candidate just has to survive the one check that distinguishes a
+  // slipped blank from every genuine line-2 string this pump draws.
+  //
+  // Note the bypass CANNOT be hardened by requiring repeats - "Check Water" is
+  // genuinely drawn once and never repeated. That is why it exists.
   bool line2_appeared = false;
   if (this->nlines_ >= 2) {
     // Inline trim (the `trimmed` helper is defined further down the file).
@@ -304,8 +349,12 @@ void ClockedTap::end_frame_() {
     while (e2 > b2 && e2[-1] == ' ')
       e2--;
     const std::string l2(b2, (size_t) (e2 - b2));
-    if (!l2.empty() && (!this->have_published_[1] || l2 != this->published_[1]))
+    if (slipped_blank(l2)) {
+      this->slipped_++;
+      ESP_LOGV(TAG, "line 2 is all '@' - bit-slipped blank, not a new screen");
+    } else if (!l2.empty() && (!this->have_published_[1] || l2 != this->published_[1])) {
       line2_appeared = true;
+    }
   }
 
   if (!settled && !line2_appeared) {
@@ -381,7 +430,18 @@ void ClockedTap::publish_lines_() {
     // Automatic Mode held a 191-bit short frame for 303 consecutive frames
     // with line 1 still lit. Blanking on the second case reports a line the
     // panel is visibly showing. Standing project rule: always read BOTH lines.
-    const std::string text = trimmed(this->lines_[l]);
+    std::string text = trimmed(this->lines_[l]);
+
+    // Second gate on the +1 slip. The bypass above is the path this corruption
+    // actually took, but the ordinary settled path can reach here too if the
+    // slip repeats stable_frames_ times running, and it would publish a screen
+    // of '@' as though it were panel output. Fold it to blank instead: that is
+    // what the panel is really showing. blank_hold still debounces it, so a
+    // single slipped frame cannot blank a line that is genuinely lit.
+    if (slipped_blank(text)) {
+      this->slipped_++;
+      text.clear();
+    }
 
     if (!text.empty()) {
       this->blank_since_[l] = 0;

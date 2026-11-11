@@ -394,6 +394,40 @@
 # did not register as a SAVE press. One observation, on one screen - Standby
 # has no soft keys, so it is the screen least likely to react - but it is the
 # first direct test the hazard has had, and it passed.
+#
+# --- Run 7, 2026-11-11 21:15 - the "@@@@@" on line 2, found and closed -------
+#
+# REPORTED: the Standby screen, whose line 2 is genuinely blank, intermittently
+# showed a row of '@' in Home Assistant for a moment before clearing.
+#
+# CAUSE - one line of arithmetic: 0x20 << 1 == 0x40, i.e. SPACE read one bit
+# late is '@'. A blank row read at a +1 slip renders as all '@'. Of the nine
+# alignments a 9-bit word can be read at, +1 is the ONLY one that yields
+# printable text from a field of spaces (+2..+8 all land outside 0x20..0x7E and
+# render as '?'), so this is the single blind spot in the decoder's '?'
+# garbled-cell indicator - it never incremented `garbled` and never looked
+# corrupt.
+#
+# It is NOT a spurious line-marker match, which was the first theory offered.
+# 0x7C is 01111100 and needs five consecutive 1 bits; a stream of spaces
+# (000100000 repeated) has only isolated 1s, so the marker cannot be synthesised
+# out of blank cells. The slip happens AFTER a genuine marker.
+#
+# WHY IT REACHED HOME ASSISTANT AT ALL: the one-shot line-2 bypass added in
+# 751fd52 accepts a changed, non-empty, printable line 2 at count=1, skipping
+# `stable_frames: 3`. A slipped blank is non-empty and printable and differs
+# from the published "" - so it went straight out. That bypass is still needed
+# ("Check Water" is drawn exactly once and never repeats, so it cannot be
+# hardened by requiring repeats); it now rejects an all-'@' candidate instead.
+# publish_lines_() folds an all-'@' line to blank as a second gate, for the case
+# where the slip repeats enough times to settle normally.
+#
+# MEASURED after the fix, 75 s on the Automatic screen:
+#   10.0 frames/s, 221936 edges, 0 dropped, 0 undecoded, 21 garbled, 3 SLIPPED
+# The new `slipped` counter is the point: ~1 slipped blank every 25 s, i.e.
+# ~0.4 % of frames, was being published as display content and counted nowhere.
+# Any future rise in `slipped` is a wiring/clock-integrity signal, the same way
+# `garbled` is.
 
 substitutions:
   # ENGLISH THROUGHOUT, changed 2026-11-11 at the user's request. Everything a

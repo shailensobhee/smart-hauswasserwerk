@@ -169,6 +169,12 @@ class ClockedTap : public Component {
   uint32_t frames_{0};
   uint32_t undecoded_{0};
   uint32_t garbled_{0};
+  // Lines rejected as a +1 bit slip on a blank row (all '@'). Counted
+  // separately from garbled_ because this corruption is PRINTABLE and so never
+  // produced a '?' - before this counter existed it incremented nothing at all
+  // and the only evidence it was happening was '@' appearing in Home
+  // Assistant. See slipped_blank() in the .cpp.
+  uint32_t slipped_{0};
   uint32_t last_stats_ms_{0};
   uint32_t last_stats_frames_{0};
 };
