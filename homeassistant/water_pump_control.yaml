@@ -50,7 +50,50 @@ input_datetime:
     has_time: true
     icon: mdi:clock-end
 
+# --- Layer 2: drive the pump's OWN clock/timer via the edit menu ------------
+# pump_timer_set.py does a closed-loop read-and-press through the Time Mode menu
+# (set hours/minutes by +/-, verify at the resting screen). It lives next to
+# configuration.yaml and runs in the HA core container (python3 + the injected
+# SUPERVISOR_TOKEN, no external URL needed).
+shell_command:
+  pump_set_clock_now: >-
+    python3 /config/pump_timer_set.py now NOW
+  pump_set_clock_to: >-
+    python3 /config/pump_timer_set.py now "{{ t }}"
+  pump_set_timer_on: >-
+    python3 /config/pump_timer_set.py on "{{ t }}"
+  pump_set_timer_off: >-
+    python3 /config/pump_timer_set.py off "{{ t }}"
+
 script:
+  # --- Layer 2 wrappers (friendly entities for the dashboard) -----------------
+  water_pump_sync_clock_to_ha:
+    alias: Water Pump - set pump clock to HA time (power-cut fix)
+    icon: mdi:clock-check
+    sequence:
+      - action: shell_command.pump_set_clock_now
+  water_pump_push_clock_now:
+    alias: Water Pump - push 'Set pump clock' value
+    icon: mdi:clock-edit
+    sequence:
+      - action: shell_command.pump_set_clock_to
+        data:
+          t: "{{ states('input_datetime.water_pump_clock_now')[:5] }}"
+  water_pump_push_timer_on:
+    alias: Water Pump - push native Time On
+    icon: mdi:clock-start
+    sequence:
+      - action: shell_command.pump_set_timer_on
+        data:
+          t: "{{ states('input_datetime.water_pump_timer_on')[:5] }}"
+  water_pump_push_timer_off:
+    alias: Water Pump - push native Time Off
+    icon: mdi:clock-end
+    sequence:
+      - action: shell_command.pump_set_timer_off
+        data:
+          t: "{{ states('input_datetime.water_pump_timer_off')[:5] }}"
+
   # --- Core primitive: reach a target mode by reading then pressing MODE ------
   water_pump_set_mode:
     alias: Water Pump - set mode (read and press)
