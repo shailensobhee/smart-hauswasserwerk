@@ -1,0 +1,156 @@
+# =============================================================================
+# Water Pump - time/on-off control (Hermes, Layer 1: robust HA scheduler)
+# =============================================================================
+# Built to the firmware author's rule (esphome/live.yaml): any clock/control
+# automation must READ THE DECODED SCREEN AND THEN PRESS, never a fixed press
+# sequence. Every script below is a closed loop over sensor.water_pump_mode.
+#
+# WHY HA-SIDE SCHEDULING (not the pump's own timer): the pump FORGETS its clock
+# on every power cut (the whole driver for this project - it falls back to
+# Standby and will not resume on its own). HA never forgets. So the real
+# schedule lives here; the pump's native timer is a secondary, hand-set extra
+# wired in Layer 2.
+#
+# SAFETY: the MODE ring is one-way Standby -> Automatic -> Time Mode -> Always
+# On -> Standby. Always On is an UNCONTROLLED RUN with no dry-run protection.
+# water_pump_set_mode transits it at 250 ms (never dwells) and refuses to make
+# it a target.
+
+input_boolean:
+  water_pump_schedule_enabled:
+    name: Pump schedule enabled
+    icon: mdi:calendar-clock
+
+input_datetime:
+  # Layer 1: the HA-side schedule (survives power cuts).
+  water_pump_on_time:
+    name: Pump ON time (HA schedule)
+    has_date: false
+    has_time: true
+    icon: mdi:timer-play
+  water_pump_off_time:
+    name: Pump OFF time (HA schedule)
+    has_date: false
+    has_time: true
+    icon: mdi:timer-stop
+  # Layer 2 intents (setters wired next): what to push into the pump's own menu.
+  water_pump_clock_now:
+    name: Pump clock - Time Now (to push)
+    has_date: false
+    has_time: true
+    icon: mdi:clock-edit
+  water_pump_timer_on:
+    name: Pump native Time On (to push)
+    has_date: false
+    has_time: true
+    icon: mdi:clock-start
+  water_pump_timer_off:
+    name: Pump native Time Off (to push)
+    has_date: false
+    has_time: true
+    icon: mdi:clock-end
+
+script:
+  # --- Core primitive: reach a target mode by reading then pressing MODE ------
+  water_pump_set_mode:
+    alias: Water Pump - set mode (read and press)
+    icon: mdi:water-pump
+    mode: restart
+    fields:
+      target:
+        description: Standby | Automatic | Time Mode (Always On is refused)
+    sequence:
+      - choose:
+          - conditions: "{{ target == 'Always On' }}"
+            sequence:
+              - stop: "Refusing Always On (uncontrolled run, no dry-run protection)"
+      - repeat:
+          count: 7
+          sequence:
+            - if:
+                - condition: template
+                  value_template: "{{ states('sensor.water_pump_mode') == target }}"
+              then:
+                - stop: reached target
+            - variables:
+                cur: "{{ states('sensor.water_pump_mode') }}"
+            - action: button.press
+              target:
+                entity_id: button.water_pump_press_mode
+            # Never dwell on Always On: press straight through it.
+            - delay: "{{ '00:00:00.25' if cur == 'Always On' else '00:00:01.6' }}"
+
+  water_pump_turn_on:
+    alias: Water Pump - turn ON (Automatic)
+    icon: mdi:play
+    sequence:
+      - action: script.water_pump_set_mode
+        data:
+          target: Automatic
+
+  water_pump_turn_off:
+    alias: Water Pump - turn OFF (Standby)
+    icon: mdi:stop
+    sequence:
+      - action: script.water_pump_set_mode
+        data:
+          target: Standby
+
+automation:
+  - id: water_pump_schedule_on
+    alias: Water Pump - scheduled ON
+    description: At the HA ON time, put the pump into Automatic (if schedule enabled).
+    trigger:
+      - platform: time
+        at: input_datetime.water_pump_on_time
+    condition:
+      - condition: state
+        entity_id: input_boolean.water_pump_schedule_enabled
+        state: "on"
+    action:
+      - action: script.water_pump_turn_on
+    mode: single
+
+  - id: water_pump_schedule_off
+    alias: Water Pump - scheduled OFF
+    description: At the HA OFF time, put the pump into Standby (if schedule enabled).
+    trigger:
+      - platform: time
+        at: input_datetime.water_pump_off_time
+    condition:
+      - condition: state
+        entity_id: input_boolean.water_pump_schedule_enabled
+        state: "on"
+    action:
+      - action: script.water_pump_turn_off
+    mode: single
+
+  # THE POWER-CUT FIX (#289): when the node comes back after being unavailable,
+  # re-assert the desired state from the HA schedule - Automatic if we are
+  # inside the ON window, else Standby. This is what the pump cannot do itself.
+  - id: water_pump_reassert_after_powercut
+    alias: Water Pump - re-assert state after power restored
+    description: Pump forgets everything on a power cut; HA puts it back.
+    trigger:
+      - platform: state
+        entity_id: sensor.water_pump_display_line_1
+        from: "unavailable"
+    condition:
+      - condition: state
+        entity_id: input_boolean.water_pump_schedule_enabled
+        state: "on"
+    action:
+      - delay: "00:00:20"   # let WiFi + decode settle after boot
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >-
+                  {% set nn = now().hour*3600 + now().minute*60 %}
+                  {% set on = state_attr('input_datetime.water_pump_on_time','timestamp')|int %}
+                  {% set off = state_attr('input_datetime.water_pump_off_time','timestamp')|int %}
+                  {% if on <= off %}{{ on <= nn < off }}{% else %}{{ nn >= on or nn < off }}{% endif %}
+            sequence:
+              - action: script.water_pump_turn_on
+        default:
+          - action: script.water_pump_turn_off
+    mode: single
